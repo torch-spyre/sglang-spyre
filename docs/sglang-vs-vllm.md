@@ -81,6 +81,15 @@ machinery you must implement; SGLang has a lower floor but requires
 small core patches today**. The gap doesn't close with the dynamic-
 shapes refactor — it's structural to the framework contracts.
 
+### How broad is model support today?
+
+At the SGLang revision pinned by this sync, **12 of 244 model
+architectures are validated on the Spyre backend**. Another 13 reach
+generation but are not supported because their output diverges or a
+correctness-critical path remains unverified. The remaining 219 are
+stopped by a known incompatibility. See §5 for the compatibility
+breakdown and the methodology behind those numbers.
+
 ### When vLLM's attention approach wins; when RadixCache wins
 
 The two attention layouts optimise for different workload shapes:
@@ -103,7 +112,7 @@ saves on small models. The dynamic-shapes refactor (KTIR
 `construct_indirect_access_tile` lowering) replaces the BMM with real
 `cache[block_table[i]]` indirection and **makes RadixCache prefix hits
 genuinely free on Spyre** for the first time. That is the regime where
-SGLang's structural advantage shows up as actual TPS gains. See §5 for
+SGLang's structural advantage shows up as actual TPS gains. See §6 for
 the differential impact on each framework.
 
 For IBM-internal workloads (RAG with shared system prompts, agent
@@ -484,7 +493,7 @@ properties of either framework. Both `spyre-inference` and this plugin
 carry essentially the same list. Including them so the picture is
 honest, not because they differentiate the two frameworks.
 
-Most of these go away with the dynamic-shapes refactor (see §5).
+Most of these go away with the dynamic-shapes refactor (see §6).
 
 | Workaround | What it does | Post-refactor status |
 |---|---|---|
@@ -541,7 +550,82 @@ as our mode 2.
 
 ---
 
-## 5. The dynamic-shapes refactor — what it changes
+## 5. Model coverage after this sync
+
+We validated every `EntryClass` registered by SGLang at revision
+`71de97b2` with real Hugging Face configurations. The audit covered the
+hard failure conditions in this backend: the batch, page, and
+head-layout checks in
+[`attention.py`](../sglang_spyre_backend/attention.py), the full,
+neox-style RoPE requirement and out-of-tree operation registry in
+[`device_ops.py`](../sglang_spyre_backend/device_ops.py), and the TP=1
+guard in [`platform.py`](../sglang_spyre_backend/platform.py).
+
+We count an architecture as supported only when it runs with correct
+output semantics. Clearing the backend's hard blockers is not enough:
+architectures with divergent output or an unverified
+correctness-critical path remain explicitly unsupported.
+
+SGLang's registry contains 245 entries in this snapshot. One of them,
+`MindSpore`, is an NPU wrapper rather than a model architecture. Removing
+it leaves **244 architectures: 12 are validated, 13 run but are not
+supported, and 219 are blocked**. The blocked table retains `MindSpore`
+as a separate row so the raw registry audit remains complete; its rows
+therefore sum to 220.
+
+### Validated and supported (12)
+
+`LlamaForCausalLM`, `Qwen3ForCausalLM`, `GraniteForCausalLM`,
+`GemmaForCausalLM`, `Olmo2ForCausalLM`, `BaichuanForCausalLM`,
+`Exaone4ForCausalLM`, `OrionForCausalLM`, `XverseForCausalLM`,
+`TeleFLMForCausalLM`, `HrmTextForCausalLM`, and
+`IQuestCoderForCausalLM`.
+
+### Unsupported: runs, but correctness diverges or is unconfirmed (13)
+
+| Architecture | Known gap |
+|---|---|
+| `Gemma2ForCausalLM` | Sliding-window attention and logit soft-capping are ignored; GELU also differs. |
+| `Gemma3ForCausalLM` | Sliding-window attention is ignored; GELU also differs. |
+| `Qwen2ForCausalLM` | Sliding-window attention is ignored. |
+| `Ministral3ForCausalLM` | Sliding-window attention is ignored. |
+| `MiMoForCausalLM` | Sliding-window attention is ignored. |
+| `SolarForCausalLM` | Sliding-window attention is ignored. |
+| `Phi3ForCausalLM` (4k) | Sliding-window attention is ignored; its head size is 96. |
+| `IQuestLoopCoderForCausalLM` | Loop sliding-window attention is ignored. |
+| `DFlashLagunaForCausalLM` | Sliding-window attention is ignored; this is also a draft model. |
+| `SDARForCausalLM` | `ENCODER_ONLY` block masks are forced to causal masks. |
+| `ApertusForCausalLM` | The `xielu` activation is not registered for Spyre. |
+| `ArceeForCausalLM` | The `relu2` activation is not registered for Spyre. |
+| `MiniCPMForCausalLM` | The normalization and RoPE path still needs correctness confirmation. |
+
+### Blocked by a known incompatibility (219 architectures, plus one wrapper)
+
+| Primary blocker | Count | Representative entries |
+|---|---:|---|
+| Multimodal architecture | 68 | Qwen-VL, LLaVA, InternVL, Gemma 3 VL |
+| Not a generation architecture | 67 | Embedding, reward, and classification models |
+| Mixture of experts | 56 | Mixtral, Qwen3-MoE, DeepSeek, GPT-OSS, Granite 4, Mellum2 |
+| LayerNorm | 8 | GPT-2, StarCoder2, OPT, Qwen 1, Phi-3-small, EXAONE 3.5, Persimmon, GPTBigCode |
+| Non-neox RoPE | 6 | Cohere/Command-R, GLM-4, ChatGLM, GPT-J, DeepSeek-V4, MuseGlimmer |
+| Partial rotary embeddings | 4 | Phi-2, StableLM, GLM-4, Gemma 4 Assistant |
+| SSM or linear attention | 4 | Falcon-H1, LFM2, Jet-Nemotron, Qwen3.5 |
+| Unsupported RoPE scaling | 3 | InternLM2/3 (`dynamic`), Phi-3-128k (`longrope`) |
+| Multi-head latent attention | 2 | MiniCPM3, Mistral Large 3 |
+| Unregistered custom operations | 1 | Gemma3n (AltUp/Laurel) |
+| Not a model architecture | 1 | MindSpore NPU wrapper |
+
+The support claim is therefore deliberately strict: **12 verified
+architectures, not 25 architectures that merely execute**. The next 13
+are useful bring-up targets because they already run, but they remain
+unsupported until their output is correct and every critical path is
+validated. The blocked distribution also makes the larger roadmap
+clear: MoE and multimodal support account for well over half of the
+remaining model architectures.
+
+---
+
+## 6. The dynamic-shapes refactor — what it changes
 
 The Spyre toolchain is moving from static-shape Inductor lowering (the
 current world) to a dynamic-shape regime where graphs can accept
@@ -620,7 +704,7 @@ favouring vLLM.
 
 ---
 
-## 6. Recommendation
+## 7. Recommendation
 
 There isn't a single "right" choice — they optimise for different
 workload shapes. But three structural observations:
