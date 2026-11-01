@@ -15,7 +15,7 @@ os.environ.setdefault("LOCAL_WORLD_SIZE", "1")
 import torch
 import torch_spyre
 
-from sglang_spyre_backend.spyre_attention_kernel import create_compilable_page_attn
+from sglang_spyre_backend.ops.page_attn import page_attn_kernel
 
 
 def _elapsed_once(fn, args, *, copy_to_cpu: bool) -> tuple[float, torch.Tensor]:
@@ -38,43 +38,31 @@ def main() -> None:
     query_len = 1
     scale = 1.0 / head_size**0.5
 
-    q_cpu = torch.randn(
-        num_kv_heads,
-        num_heads // num_kv_heads,
-        query_len,
-        head_size,
-        dtype=torch.float16,
-    )
-    k_cpu = torch.randn(
-        num_blocks,
-        block_size,
-        num_kv_heads,
-        head_size,
-        dtype=torch.float16,
-    )
+    num_kv_heads_q = num_heads // num_kv_heads
+    query_cpu = torch.randn(query_len, num_heads, head_size, dtype=torch.float16)
+    k_cpu = torch.randn(num_blocks, block_size, num_kv_heads, head_size, dtype=torch.float16)
     v_cpu = torch.randn_like(k_cpu)
+    rows_cpu = torch.zeros(query_len, dtype=torch.int64)
     indices_cpu = torch.zeros(num_blocks, 32, dtype=torch.int64)
     indices_cpu[:, 0] = torch.arange(num_blocks)
-    masks_cpu = [
-        torch.zeros(query_len, block_size, dtype=torch.float16)
-        for _ in range(num_blocks)
-    ]
+    mask_cpu = torch.zeros(num_blocks, query_len, block_size, dtype=torch.float16)
+    del num_kv_heads_q
 
-    native = create_compilable_page_attn(num_blocks, query_len, num_heads, head_size)
-    compiled_spyre = torch.compile(
-        create_compilable_page_attn(num_blocks, query_len, num_heads, head_size),
-        dynamic=False,
-    )
-    indices_spyre = indices_cpu.to(torch.int32).to("spyre")
+    def native(*args):
+        return page_attn_kernel(*args)
+
+    compiled_spyre = torch.compile(page_attn_kernel, dynamic=False)
+    statics = (scale, num_blocks, query_len, num_heads, num_kv_heads, head_size)
     spyre_args = (
-        q_cpu.to("spyre"),
+        query_cpu.to("spyre"),
+        rows_cpu.to(torch.int32).to("spyre"),
         k_cpu.to("spyre"),
         v_cpu.to("spyre"),
-        indices_spyre,
-        [mask.to("spyre") for mask in masks_cpu],
-        scale,
+        indices_cpu.to(torch.int32).to("spyre"),
+        mask_cpu.to("spyre"),
+        *statics,
     )
-    cpu_args = (q_cpu, k_cpu, v_cpu, indices_cpu, masks_cpu, scale)
+    cpu_args = (query_cpu, rows_cpu, k_cpu, v_cpu, indices_cpu, mask_cpu, *statics)
 
     # Compile and warm both paths outside the reported single-pass timing.
     spyre_warm = compiled_spyre(*spyre_args).to("cpu")
@@ -88,7 +76,7 @@ def main() -> None:
     print(
         json.dumps(
             {
-                "model_geometry": "ibm-ai-platform/micro-g3.3-8b-instruct-1b",
+                "model_geometry": "ibm-ai-platform/micro-g3.3-8b-instruct-1b (token-major paged kernel)",
                 "operation": "one decode attention forward over 256 cached tokens",
                 "pytorch_cpu_ms": cpu_ms,
                 "spyre_ms_including_output_copy": spyre_ms,

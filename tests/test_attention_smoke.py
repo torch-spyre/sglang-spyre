@@ -45,17 +45,23 @@ def main():
             return 4
 
     class StubKVPool:
-        size = 256
-        page_size = 64
+        size = 1024
+        page_size = 128
 
     class StubReqToTokenPool:
-        req_to_token = torch.arange(256).reshape(1, 256)
+        # Request 0 owns page 1 onward; page 0 is the reserved padding page.
+        req_to_token = (torch.arange(1024) + 128).reshape(1, 1024)
 
     class StubServerArgs:
         tp_size = 1
+        chunked_prefill_size = 512
+        max_running_requests = 1
+
+    class StubModelConfig2:
+        context_len = 1024
 
     class StubModelRunner:
-        model_config = StubModelConfig()
+        model_config = StubModelConfig2()
         token_to_kv_pool = StubKVPool()
         req_to_token_pool = StubReqToTokenPool()
         server_args = StubServerArgs()
@@ -64,6 +70,9 @@ def main():
 
     # Step 4: instantiate attention backend via SGLang's registry
     from sglang.srt.layers.attention.attention_registry import ATTENTION_BACKENDS
+
+    # init_backend() imports this in an engine's worker process.
+    import sglang_spyre_backend.register  # noqa: F401
 
     assert "spyre_paged" in ATTENTION_BACKENDS
     backend = ATTENTION_BACKENDS["spyre_paged"](runner)
@@ -91,36 +100,39 @@ def main():
         extend_seq_lens_cpu = [8]
         extend_seq_lens = torch.tensor([8])
         extend_num_tokens = 8
-        out_cache_loc = torch.arange(8, dtype=torch.int64)
+        out_cache_loc = torch.arange(8, dtype=torch.int64) + 128
 
     fb = StubForwardBatch()
 
     print("\n  Running init_forward_metadata (prefill)...")
     backend.init_forward_metadata(fb)
-    print(f"    aligned_query_len: {backend._state.aligned_query_len}")
-    print(f"    mask tiles: {len(backend._state.mask_tiles_cpu)}")
-    print("  ✓ Metadata built and on Spyre")
+    print(f"    block table: {backend._batch.block_table[0, :2].tolist()}")
+    print("  ✓ Metadata built")
 
     # Step 6: build a fake RadixAttention layer
     class StubRadixAttention:
+        # granite-3.3-8b-instruct's attention geometry, the one validated end to end.
         layer_id = 0
-        tp_q_head_num = 4
-        tp_k_head_num = 4
-        tp_v_head_num = 4
-        qk_head_dim = 64
-        scaling = 1.0 / (64**0.5)
-        v_head_dim = 64
+        tp_q_head_num = 32
+        tp_k_head_num = 8
+        tp_v_head_num = 8
+        qk_head_dim = 128
+        scaling = 1.0 / (128**0.5)
+        v_head_dim = 128
+        sliding_window_size = -1
+        logit_cap = 0.0
 
     layer = StubRadixAttention()
     num_tokens = 8
-    num_heads = 4
-    head_dim = 64
+    num_heads = 32
+    num_kv_heads = 8
+    head_dim = 128
 
     # Random q,k,v in FP16 on CPU (SGLang convention)
     torch.manual_seed(42)
     q = torch.randn(num_tokens, num_heads, head_dim, dtype=torch.float16)
-    k = torch.randn(num_tokens, num_heads, head_dim, dtype=torch.float16)
-    v = torch.randn(num_tokens, num_heads, head_dim, dtype=torch.float16)
+    k = torch.randn(num_tokens, num_kv_heads, head_dim, dtype=torch.float16)
+    v = torch.randn(num_tokens, num_kv_heads, head_dim, dtype=torch.float16)
 
     print("\n  Running forward_extend...")
     out = backend.forward_extend(q, k, v, layer, fb, save_kv_cache=True)
@@ -129,7 +141,14 @@ def main():
     print(f"    output device: {out.device}")
     assert out.shape == (num_tokens, num_heads * head_dim), f"bad shape: {out.shape}"
     assert not torch.isnan(out).any(), "output contains NaN"
-    print("  ✓ forward_extend produced valid output")
+    ref = torch.nn.functional.scaled_dot_product_attention(
+        q.float().transpose(0, 1), k.float().transpose(0, 1), v.float().transpose(0, 1),
+        is_causal=True, enable_gqa=True,
+    ).transpose(0, 1).reshape(num_tokens, num_heads * head_dim)
+    err = (out.float() - ref).abs().max().item()
+    print(f"    max abs error vs CPU SDPA: {err:.4f}")
+    assert err < 2e-2, f"output differs from CPU SDPA by {err}"
+    print("  ✓ forward_extend matches CPU attention")
 
     print("\n=== SMOKE TEST PASSED ===")
 
