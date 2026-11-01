@@ -9,11 +9,11 @@ The reference points used in this doc:
   (`github.com/torch-spyre/spyre-inference`). The behaviour described here
   is the post-V1 plugin model. Spyre's `wiki/stack/vllm.md` page documents
   an older snapshot from before the V1 refactor and is being rewritten.
-- **SGLang**: upstream `main` (≈v0.5.12), plus this repo
-  (`Gal-Bloch/Spyre-SGLang`) — an out-of-tree platform plugin we built to
-  prototype Spyre integration. Where this doc cites concrete TPS, those
-  are from our prototype on Granite-1B; they are validation numbers, not
-  reliable benchmarks.
+- **SGLang**: release `0.5.21`, plus this repo (`torch-spyre/sglang-spyre`),
+  an out-of-tree platform plugin synchronized with spyre-inference
+  `0ccdbf6` (2026-10-30). §5 and [`BENCHMARK.md`](../BENCHMARK.md) carry the
+  measured model support and the SGLang-vs-vLLM comparison at that baseline;
+  the older Granite-1B TPS figures in §4 are prototype validation numbers.
 
 ---
 
@@ -28,8 +28,10 @@ The reference points used in this doc:
 | GPU INT-quant breadth (AWQ / GPTQ / GGUF / bitsandbytes) | ✅ Wider matrix upstream, but **none apply to Spyre** (INT support dropped) | n/a |
 | Spyre's actual low-precision formats (DL16 / BF16 / FP8 E4M3+E5M2 / FP4) | comparable — both require plugin-side integration | comparable |
 | FP8 KV-cache plumbing upstream (scale management, dequant-on-read) | slightly more mature in core | newer, narrower — but on Spyre the KV pool is owned by the plugin anyway, so this gap doesn't carry over |
-| Speculative decoding, multi-LoRA, MoE routing | ✅ More mature | newer, narrower |
-| Encoder-decoder, sliding-window, prefix quant | ✅ Available today | partial |
+| Speculative decoding, multi-LoRA | ✅ More mature | newer, narrower |
+| MoE routing on Spyre | both run spyre-inference's expert kernels (Gemma-4-26B-A4B) | comparable |
+| Sliding-window attention, logit soft-capping on Spyre | both run spyre-inference's masks and kernels | comparable |
+| Encoder-decoder, prefix quant, FP8 on Spyre | ✅ Available today | not ported |
 | Plugin contract for a new device (less code) | ~3500 lines for `spyre-inference` | ✅ ~1500 lines for this plugin |
 | Reusable attention base class | interface only | ✅ `TorchNativeAttnBackend` is real |
 | Reusable KV pool | plugin-supplied | ✅ device-agnostic base, override one method |
@@ -83,12 +85,13 @@ shapes refactor — it's structural to the framework contracts.
 
 ### How broad is model support today?
 
-At the SGLang revision pinned by this sync, **12 of 244 model
-architectures are validated on the Spyre backend**. Another 13 reach
-generation but are not supported because their output diverges or a
-correctness-critical path remains unverified. The remaining 219 are
-stopped by a known incompatibility. See §5 for the compatibility
-breakdown and the methodology behind those numbers.
+The 2026-11-01 sync ports every Spyre mechanism spyre-inference's text
+decoders use: MoE expert dispatch, sliding-window attention, logit
+soft-capping and per-layer head shapes. The two models spyre-inference
+benchmarks as Granite 8B and Gemma 4, `granite-3.3-8b-instruct` and
+`gemma-4-26B-A4B-it`, are validated end to end against spyre-inference on
+the same card. §5 lists what is validated, what merely runs, and what is
+still blocked.
 
 ### When vLLM's attention approach wins; when RadixCache wins
 
@@ -552,76 +555,38 @@ as our mode 2.
 
 ## 5. Model coverage after this sync
 
-We validated every `EntryClass` registered by SGLang at revision
-`71de97b2` with real Hugging Face configurations. The audit covered the
-hard failure conditions in this backend: the batch, page, and
-head-layout checks in
-[`attention.py`](../sglang_spyre_backend/attention.py), the full,
-neox-style RoPE requirement and out-of-tree operation registry in
-[`device_ops.py`](../sglang_spyre_backend/device_ops.py), and the TP=1
-guard in [`platform.py`](../sglang_spyre_backend/platform.py).
+This section follows spyre-inference's model registry
+(`spyre_inference/config/model_configs.yaml` at `0ccdbf6`), which lists the
+models spyre-inference serves and validates, rather than SGLang's full
+architecture list. An entry counts as **validated** only if it was run end to
+end on a Spyre card with this baseline and its greedy output compared with
+spyre-inference/vLLM on the same card; **runs** means it loads and generates
+through code paths validated on another model, without that comparison.
 
-We count an architecture as supported only when it runs with correct
-output semantics. Clearing the backend's hard blockers is not enough:
-architectures with divergent output or an unverified
-correctness-critical path remain explicitly unsupported.
+### Validated against spyre-inference
 
-SGLang's registry contains 245 entries in this snapshot. One of them,
-`MindSpore`, is an NPU wrapper rather than a model architecture. Removing
-it leaves **244 architectures: 12 are validated, 13 run but are not
-supported, and 219 are blocked**. The blocked table retains `MindSpore`
-as a separate row so the raw registry audit remains complete; its rows
-therefore sum to 220.
+| Model | Mechanisms exercised | Result |
+|---|---|---|
+| `ibm-granite/granite-3.3-8b-instruct` | dense GQA attention, full rotary RoPE, SiLU MLP, tied LM head | Same answer as vLLM on 4/5 MMLU items. The fifth is a 0.1-logit tie that the fp32 reference resolves SGLang's way. Latency 1.00x vLLM. |
+| `google/gemma-4-26B-A4B-it` (text backbone) | 128-expert top-8 MoE with full-softmax routing, sliding-window (1024) and full attention layers with different head sizes (256/512) and KV heads (8/2), proportional partial RoPE, final logit soft-capping (30), K=V full-attention layers | Same answer letter as vLLM wherever both produce one; texts identical on 2/5 items and diverging at fp16 noise on the rest. Latency 0.99x vLLM. See [`BENCHMARK.md`](../BENCHMARK.md). |
 
-### Validated and supported (12)
+### Runs, not validated in this sync
 
-`LlamaForCausalLM`, `Qwen3ForCausalLM`, `GraniteForCausalLM`,
-`GemmaForCausalLM`, `Olmo2ForCausalLM`, `BaichuanForCausalLM`,
-`Exaone4ForCausalLM`, `OrionForCausalLM`, `XverseForCausalLM`,
-`TeleFLMForCausalLM`, `HrmTextForCausalLM`, and
-`IQuestCoderForCausalLM`.
-
-### Unsupported: runs, but correctness diverges or is unconfirmed (13)
-
-| Architecture | Known gap |
+| Model | Note |
 |---|---|
-| `Gemma2ForCausalLM` | Sliding-window attention and logit soft-capping are ignored; GELU also differs. |
-| `Gemma3ForCausalLM` | Sliding-window attention is ignored; GELU also differs. |
-| `Qwen2ForCausalLM` | Sliding-window attention is ignored. |
-| `Ministral3ForCausalLM` | Sliding-window attention is ignored. |
-| `MiMoForCausalLM` | Sliding-window attention is ignored. |
-| `SolarForCausalLM` | Sliding-window attention is ignored. |
-| `Phi3ForCausalLM` (4k) | Sliding-window attention is ignored; its head size is 96. |
-| `IQuestLoopCoderForCausalLM` | Loop sliding-window attention is ignored. |
-| `DFlashLagunaForCausalLM` | Sliding-window attention is ignored; this is also a draft model. |
-| `SDARForCausalLM` | `ENCODER_ONLY` block masks are forced to causal masks. |
-| `ApertusForCausalLM` | The `xielu` activation is not registered for Spyre. |
-| `ArceeForCausalLM` | The `relu2` activation is not registered for Spyre. |
-| `MiniCPMForCausalLM` | The normalization and RoPE path still needs correctness confirmation. |
+| `google/gemma-3-1b-it` | Dense Gemma path with sliding-window layers; SGLang's Gemma-3 model, not compared against spyre-inference here. |
+| `ibm-granite/granite-4.1-8b` | `GraniteForCausalLM`, the validated Granite path; spyre-inference serves it at TP4 only. |
+| Other decoder architectures from the previous sync (Llama, Qwen3, OLMo-2, ...) | Same dense path as Granite; previously validated at the old baseline, not re-run. |
 
-### Blocked by a known incompatibility (219 architectures, plus one wrapper)
+### Not supported
 
-| Primary blocker | Count | Representative entries |
-|---|---:|---|
-| Multimodal architecture | 68 | Qwen-VL, LLaVA, InternVL, Gemma 3 VL |
-| Not a generation architecture | 67 | Embedding, reward, and classification models |
-| Mixture of experts | 56 | Mixtral, Qwen3-MoE, DeepSeek, GPT-OSS, Granite 4, Mellum2 |
-| LayerNorm | 8 | GPT-2, StarCoder2, OPT, Qwen 1, Phi-3-small, EXAONE 3.5, Persimmon, GPTBigCode |
-| Non-neox RoPE | 6 | Cohere/Command-R, GLM-4, ChatGLM, GPT-J, DeepSeek-V4, MuseGlimmer |
-| Partial rotary embeddings | 4 | Phi-2, StableLM, GLM-4, Gemma 4 Assistant |
-| SSM or linear attention | 4 | Falcon-H1, LFM2, Jet-Nemotron, Qwen3.5 |
-| Unsupported RoPE scaling | 3 | InternLM2/3 (`dynamic`), Phi-3-128k (`longrope`) |
-| Multi-head latent attention | 2 | MiniCPM3, Mistral Large 3 |
-| Unregistered custom operations | 1 | Gemma3n (AltUp/Laurel) |
-| Not a model architecture | 1 | MindSpore NPU wrapper |
-
-The support claim is therefore deliberately strict: **12 verified
-architectures, not 25 architectures that merely execute**. The next 13
-are useful bring-up targets because they already run, but they remain
-unsupported until their output is correct and every critical path is
-validated. The blocked distribution also makes the larger roadmap
-clear: MoE and multimodal support account for well over half of the
-remaining model architectures.
+| Area | Reason |
+|---|---|
+| FP8 checkpoints (`granite-*-fp8`) and FP8 KV cache | spyre-inference's `spyre.scaled_mm` linear and QFP8CH KV pages are not ported. |
+| Vision and multimodal (`granite-vision-4.1-4b`, Gemma-4 vision, Pixtral) | Vision towers are not ported; Gemma-4 is served through its text backbone. |
+| Embedding, reranker and token-classification models | SGLang text generation only. |
+| Tensor parallelism > 1 | The platform rejects TP>1; spyre-inference's TP4 configs run here at TP1 when they fit one card. |
+| ALiBi models | Only the head-major KV layout is ported, which carries no ALiBi (as in spyre-inference). |
 
 ---
 
