@@ -11,13 +11,16 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
-    # Keep this compatibility set aligned with spyre-inference.  SGLang 0.5.18
-    # is the first release in this line that pins the same Torch major/minor.
-    "sglang==0.5.18",
+    # Keep this compatibility set aligned with spyre-inference.  SGLang 0.5.21
+    # is the newest release that still pins torch 2.13.0: 0.5.22 moves to
+    # torch 2.14.1 and transformers 5.19.0, outside spyre-inference's
+    # torch==2.13.0 / transformers<5.17 contract.
+    "sglang==0.5.21",
     "torch==2.13.0",
     "torch-spyre",
     # Imported by SGLang at module load even though Spyre never dispatches it.
-    "triton==3.6.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # Same triton-cpu build spyre-inference installs on x86_64.
+    "triton==3.8.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision==0.28.0",
 ]
 classifiers = [
@@ -44,8 +47,13 @@ include = ["sglang_spyre_backend*", "sglang_oot_patches*"]
 [tool.uv]
 prerelease = "allow"
 override-dependencies = [
-    # Align SGLang's fast-moving transitive stack with spyre-inference.
-    "transformers==5.14.1",
+    # Align SGLang's fast-moving transitive stack with spyre-inference, which
+    # locks transformers 5.16.1 under its <5.17 cap.
+    "transformers==5.16.1",
+    # transformers 5.16 needs tokenizers >=0.23.1; SGLang 0.5.21 pins 0.22.2
+    # only to keep CLIPTokenizer working, which no Spyre text model uses.
+    # Same version spyre-inference locks.
+    "tokenizers==0.23.3",
     # Spyre does not use the audio path; its binary wheel is not available in
     # the runtime image.
     "torchaudio; sys_platform == 'never'",
@@ -58,13 +66,46 @@ torch-spyre = ["torch==2.13.0"]
 
 [tool.uv.extra-build-variables.torch-spyre]
 USE_SPYRE_PROFILER = "0"
+# Must equal [tool.spyre-rpms] bundle, as in spyre-inference: a change makes uv
+# rebuild a cached torch-spyre wheel against the new RPMs.
+SPYRE_RPM_BUNDLE = "main_nightly_2026_10_27"
 
 [tool.uv.sources]
-torch-spyre = { git = "https://github.com/torch-spyre/torch-spyre", rev = "a31289852145a59099edccc3e506cf5336e8e2e0" }
+torch-spyre = { git = "https://github.com/torch-spyre/torch-spyre", rev = "64870622fc39cda7e344a271decb901e7088c6c6" }
 torch = [{ index = "pytorch-cpu" }]
+triton = [
+  { url = "https://github.com/triton-lang/triton-cpu/releases/download/v3.8.0/triton-3.8.0+cpu-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", marker = "python_version == '3.11'" },
+  { url = "https://github.com/triton-lang/triton-cpu/releases/download/v3.8.0/triton-3.8.0+cpu-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", marker = "python_version >= '3.12'" },
+]
 torchvision = [{ index = "pytorch-cpu" }]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
+
+# spyre-rpms.lock is spyre-inference's generated lock for this bundle, copied
+# unchanged from the pinned spyre-inference revision in compatibility.toml.
+# Check it offline with spyre-inference's
+# `python3 scripts/lock_spyre_rpms.py --verify --pyproject <this file>`.
+[tool.spyre-rpms]
+bundle = "main_nightly_2026_10_27"
+packages = [
+  "ibm-aiu-toolbox-e2e",
+  "ibm-deeptools",
+  "ibm-deeptools-devel",
+  "ibm-flex",
+  "ibm-flex-devel",
+  "ibm-senlib-core",
+  "ibm-senlib-dd2",
+  "ibm-senlib-headers",
+  "ibm-spyre-comms",
+  "ibm-spyre-comms-devel",
+  "ibm-libaiupti",
+]
+
+[tool.spyre-rpms.devel]
+ibm-deeptools-devel = "ibm-deeptools"
+ibm-flex-devel = "ibm-flex"
+ibm-senlib-headers = "ibm-senlib-core"
+ibm-spyre-comms-devel = "ibm-spyre-comms"
