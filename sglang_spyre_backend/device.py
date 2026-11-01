@@ -60,6 +60,13 @@ class SpyreDeviceMixin(DeviceMixin):
             except Exception:
                 pass
 
+    def get_torch_profiler_activity_str(self) -> str:
+        # torch-spyre reports device kernels under PrivateUse1.
+        return "PrivateUse1"
+
+    def get_torch_profiler_activity(self) -> torch.profiler.ProfilerActivity:
+        return torch.profiler.ProfilerActivity.PrivateUse1
+
     def get_torch_distributed_backend_str(self) -> str:
         # spyreccl for Spyre tensors; gloo for CPU coordination tensors.
         return "cpu:gloo,spyre:spyreccl"
