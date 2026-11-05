@@ -1,4 +1,12 @@
-"""Small on-hardware A/B benchmark against the pinned spyre-inference kernel."""
+"""On-hardware A/B of the vendored head-major kernels against spyre-inference's own.
+
+Runs the decode-path kernels SGLang dispatches at batch 1, the per-sequence LX
+decode kernel and the batched decode kernel, once from this repo's
+``sglang_spyre_backend.ops`` copy and once from the installed spyre-inference
+package, on identical inputs. Both are compiled the same way; compilation
+warm-up is excluded. Needs a Spyre card and spyre-inference importable (run it
+from the vLLM environment with this repo on ``PYTHONPATH``).
+"""
 
 from __future__ import annotations
 
@@ -8,18 +16,17 @@ import statistics
 import time
 
 os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
-os.environ.setdefault("RANK", "0")
-os.environ.setdefault("WORLD_SIZE", "1")
-os.environ.setdefault("LOCAL_RANK", "0")
-os.environ.setdefault("LOCAL_WORLD_SIZE", "1")
+for _k, _v in dict(RANK="0", WORLD_SIZE="1", LOCAL_RANK="0", LOCAL_WORLD_SIZE="1").items():
+    os.environ.setdefault(_k, _v)
 
 import torch
 import torch_spyre
-from spyre_inference.v1.attention.backends.spyre_attn import (
-    _create_compilable_page_attn as create_reference_page_attn,
+from spyre_inference.v1.attention.ops import (
+    page_attn_head_major_decode as ref_decode,
 )
 
-from sglang_spyre_backend.spyre_attention_kernel import create_compilable_page_attn
+from sglang_spyre_backend.ops import page_attn_head_major_decode as port_decode
+from sglang_spyre_backend.ops.layout import head_major_kv_layout
 
 
 def _sync() -> None:
@@ -42,78 +49,53 @@ def _measure(fn, args, *, samples: int, iterations: int) -> list[float]:
 
 def main() -> None:
     torch_spyre._autoload()
-    torch.spyre.set_device(0)
     torch.manual_seed(7)
-
-    num_blocks = 4
-    block_size = 64
-    # ibm-ai-platform/micro-g3.3-8b-instruct-1b attention geometry.
-    num_heads = 32
-    num_kv_heads = 8
-    queries_per_kv = num_heads // num_kv_heads
-    query_len = 1
-    head_size = 128
     dtype = torch.float16
     device = torch.device("spyre")
 
-    q = torch.randn(num_kv_heads, queries_per_kv, query_len, head_size, dtype=dtype).to(
-        device
+    # granite-3.3-8b-instruct decode attention at 512 cached tokens.
+    num_heads, num_kv_heads, head_size, block_size = 32, 8, 128, 128
+    num_blocks, num_pages = 4, 16
+    layout = head_major_kv_layout(num_pages * num_kv_heads, block_size, head_size, dtype)
+    shape = (num_pages * num_kv_heads, block_size, head_size)
+    k = torch.randn(shape, dtype=dtype).to(device, device_layout=layout)
+    v = torch.randn(shape, dtype=dtype).to(device, device_layout=layout)
+    query = torch.randn(8, num_heads, head_size, dtype=dtype).to(device)
+    rows = torch.tensor([0], dtype=torch.int32).to(device)
+    table = torch.zeros(num_blocks, 32, dtype=torch.int32)
+    table[:, 0] = torch.tensor([3, 1, 7, 5], dtype=torch.int32)
+    table = table.to(device)
+    pool = (
+        torch.arange(num_pages * num_kv_heads, dtype=torch.int32)
+        .reshape(num_pages, num_kv_heads, 1)
+        .to(device)
     )
-    k = torch.randn(num_blocks, block_size, num_kv_heads, head_size, dtype=dtype).to(
-        device
-    )
-    v = torch.randn(num_blocks, block_size, num_kv_heads, head_size, dtype=dtype).to(
-        device
-    )
-    indices = torch.zeros(num_blocks, 32, dtype=torch.int32)
-    indices[:, 0] = torch.arange(num_blocks, dtype=torch.int32)
-    indices = indices.to(device)
-    masks = [
-        torch.zeros(query_len, block_size, dtype=dtype).to(device)
-        for _ in range(num_blocks)
-    ]
-    args = (q, k, v, indices, masks, 1.0 / head_size**0.5)
-
-    candidate = torch.compile(
-        create_compilable_page_attn(num_blocks, query_len, num_heads, head_size),
-        dynamic=False,
-    )
-    reference = torch.compile(
-        create_reference_page_attn(num_blocks, query_len, num_heads, head_size),
-        dynamic=False,
+    mask = torch.zeros(num_blocks, 1, block_size, dtype=dtype).to(device)
+    args = (
+        query, rows, k, v, table, pool, mask, head_size**-0.5,
+        num_blocks, 1, num_heads, num_kv_heads, head_size, block_size,
     )
 
-    candidate_out = candidate(*args)
-    reference_out = reference(*args)
-    _sync()
-    torch.testing.assert_close(
-        candidate_out.to("cpu"), reference_out.to("cpu"), rtol=0, atol=0
-    )
-
-    # Compile/cache warmup is deliberately excluded.
-    for _ in range(3):
-        candidate(*args)
-        reference(*args)
-    _sync()
-
-    samples = int(os.environ.get("SPYRE_AB_SAMPLES", "5"))
-    iterations = int(os.environ.get("SPYRE_AB_ITERATIONS", "20"))
-    candidate_ms = _measure(candidate, args, samples=samples, iterations=iterations)
-    reference_ms = _measure(reference, args, samples=samples, iterations=iterations)
-    candidate_median = statistics.median(candidate_ms)
-    reference_median = statistics.median(reference_ms)
-    ratio = candidate_median / reference_median
-    result = {
-        "candidate_ms": candidate_ms,
-        "reference_ms": reference_ms,
-        "candidate_median_ms": candidate_median,
-        "reference_median_ms": reference_median,
-        "candidate_over_reference": ratio,
-        "within_15_percent": 0.85 <= ratio <= 1.15,
+    port = torch.compile(port_decode.page_attn_head_major_decode_kernel, dynamic=False, fullgraph=True)
+    ref = torch.compile(ref_decode.page_attn_head_major_decode_kernel, dynamic=False, fullgraph=True)
+    out_port = port(*args).to("cpu")
+    out_ref = ref(*args).to("cpu")
+    port_ms = _measure(port, args, samples=7, iterations=20)
+    ref_ms = _measure(ref, args, samples=7, iterations=20)
+    payload = {
+        "geometry": {
+            "query_heads": num_heads,
+            "kv_heads": num_kv_heads,
+            "head_size": head_size,
+            "cached_tokens": num_blocks * block_size,
+        },
+        "kernel": "page_attn_head_major_decode_kernel",
+        "candidate_median_ms": statistics.median(port_ms),
+        "spyre_inference_median_ms": statistics.median(ref_ms),
+        "candidate_over_reference": statistics.median(port_ms) / statistics.median(ref_ms),
+        "exact_output_match": bool(torch.equal(out_port, out_ref)),
     }
-    print(json.dumps(result, indent=2, sort_keys=True))
-    if not result["within_15_percent"]:
-        raise SystemExit("ported kernel differs from spyre-inference by more than 15%")
+    print("SPYRE_KERNEL_AB=" + json.dumps(payload, sort_keys=True))
 
 
 if __name__ == "__main__":

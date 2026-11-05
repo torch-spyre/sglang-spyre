@@ -1,0 +1,696 @@
+{
+  "date": "2026-11-01",
+  "environment": {
+    "cluster": "api.dev.spyre.res.ibm.com",
+    "container_image": "icr.io/ai_sw_accel/2.0/next/spyre-backend",
+    "container_image_digest": "sha256:e655db95b4037ecb3e587658a59ed2ce6a8b6b393da8bfe85eac21708353d657",
+    "cpu": "Intel(R) Xeon(R) 6736P, 32 pinned cores per card",
+    "kernel_cache": "SPYRE_KERNEL_CACHE unset (off)",
+    "node": "p1-worker-80",
+    "pod": "galbloch-spyre-dev-pf",
+    "runtime_rpms": {
+      "ibm-aiu-toolbox-e2e": "2.0.0_rc.5-0.main.6+6.3307e2f9",
+      "ibm-deeptools": "2.0.0_rc.1-0.master.198+198.092f4e79",
+      "ibm-flex": "2.0.0_rc.1-0.main.87+87.5aaf4902",
+      "ibm-libaiupti": "2.0.0_rc.2-0.main.17+17.3c1815cb",
+      "ibm-senlib": "2.0.0_rc.5-0.main.25+25.15d57f06",
+      "ibm-spyre-comms": "2.0.0_rc.1-0.main.34+34.748f4ace"
+    },
+    "sglang_revision": "e00930c5489053f26d86b179cee0d087f846acbb",
+    "spyre_inference_revision": "0ccdbf6ac2da7faacf98db93464b274fb8f40126",
+    "torch": "2.13.0+cpu",
+    "torch_spyre_revision": "64870622fc39cda7e344a271decb901e7088c6c6",
+    "transformers": "5.16.1",
+    "vllm_revision": "5df63a7203cdb9328d824a27b682e77c7b9928be"
+  },
+  "method": {
+    "cards": {
+      "google/gemma-4-26B-A4B-it": {
+        "sglang": 2,
+        "vllm": 3
+      },
+      "ibm-granite/granite-3.3-8b-instruct": {
+        "sglang": 1,
+        "vllm": 0
+      }
+    },
+    "description": "tests/mmlu_sglang_vs_vllm_bench.py: five pinned cais/mmlu test items, identical token ids on both frameworks, batch size 1, greedy, 16 new tokens; per item one warmup, then three measured 1-token (TTFT) and three measured 16-token (latency) requests. Output throughput = 15 / (latency - TTFT).",
+    "parity_gate": "SGLang/vLLM mean latency within \u00b115% (BENCHMARK.md)",
+    "sglang": "SGLang 0.5.21 + sglang-spyre (this branch), device=cpu with the body on Spyre, attention_backend=spyre_paged, page_size=128, chunked_prefill_size=512, context_length=2048",
+    "vllm": "vLLM 0.32.0 + spyre-inference 0ccdbf6, max_model_len=2048, max_num_seqs=1, max_num_batched_tokens=512, VLLM_ENABLE_V1_MULTIPROCESSING=0"
+  },
+  "models": {
+    "google/gemma-4-26B-A4B-it": {
+      "aggregate": {
+        "matching_answers": 4,
+        "matching_texts": 2,
+        "parity_pass": true,
+        "parity_threshold": 0.15,
+        "sglang": {
+          "accuracy": 0.2,
+          "mean_latency_seconds": 2.395065726246685,
+          "mean_output_tokens_per_second": 9.913195956333052,
+          "mean_ttft_seconds": 0.8815017915330827
+        },
+        "sglang_over_vllm_latency": 0.9938202811962529,
+        "sglang_over_vllm_output_throughput": 1.012869059939807,
+        "sglang_over_vllm_ttft": 1.006245183119399,
+        "vllm": {
+          "accuracy": 0.2,
+          "mean_latency_seconds": 2.4099585926781097,
+          "mean_output_tokens_per_second": 9.7872433352068,
+          "mean_ttft_seconds": 0.8760308186523617
+        }
+      },
+      "batch_size": 1,
+      "dataset": "cais/mmlu",
+      "dataset_revision": "c30699e8356da336a370243923dbaf21066bb9fe",
+      "examples": [
+        {
+          "answer": "B",
+          "hf_cpu_reference_top3": [
+            [
+              " ",
+              25.75
+            ],
+            [
+              " B",
+              24.75
+            ],
+            [
+              " E",
+              23.75
+            ]
+          ],
+          "input_tokens": 70,
+          "same_answer": false,
+          "same_text": false,
+          "sglang": {
+            "generated_text": " 0\n\nWait, I'm looking for the degree of the field extension",
+            "latency_seconds": [
+              2.330509793944657,
+              2.38444994809106,
+              2.381622281856835
+            ],
+            "mean_latency_seconds": 2.365527341297517,
+            "mean_ttft_seconds": 0.8780249940852324,
+            "output_tokens_per_second": 10.084017701290602,
+            "predicted": null,
+            "ttft_seconds": [
+              0.8772922172211111,
+              0.8811523742042482,
+              0.875630390830338
+            ]
+          },
+          "subject": "abstract_algebra",
+          "test_index": 0,
+          "vllm": {
+            "generated_text": " 0\nWait, I'm thinking about it.\nA. ",
+            "latency_seconds": [
+              2.442371706943959,
+              2.3696282510645688,
+              2.5405365331098437
+            ],
+            "mean_latency_seconds": 2.4508454970394573,
+            "mean_ttft_seconds": 0.8409890231365958,
+            "output_tokens_per_second": 9.317600819180292,
+            "predicted": "A",
+            "ttft_seconds": [
+              0.8386631342582405,
+              0.8454618812538683,
+              0.8388420538976789
+            ]
+          }
+        },
+        {
+          "answer": "A",
+          "hf_cpu_reference_top3": [
+            [
+              " A",
+              23.0
+            ],
+            [
+              "\n\n",
+              21.375
+            ],
+            [
+              " ",
+              19.875
+            ]
+          ],
+          "input_tokens": 104,
+          "same_answer": true,
+          "same_text": true,
+          "sglang": {
+            "generated_text": "\n\nA. paralysis of the facial muscles.\nB. paralysis of the facial",
+            "latency_seconds": [
+              2.384157456923276,
+              2.3989466899074614,
+              2.381244492251426
+            ],
+            "mean_latency_seconds": 2.388116213027388,
+            "mean_ttft_seconds": 0.8745075532545646,
+            "output_tokens_per_second": 9.910091292851973,
+            "predicted": "A",
+            "ttft_seconds": [
+              0.8715115138329566,
+              0.8773859948851168,
+              0.8746251510456204
+            ]
+          },
+          "subject": "anatomy",
+          "test_index": 0,
+          "vllm": {
+            "generated_text": "\n\nA. paralysis of the facial muscles.\nB. paralysis of the facial",
+            "latency_seconds": [
+              2.500523458234966,
+              2.2946730703115463,
+              2.3798323567025363
+            ],
+            "mean_latency_seconds": 2.391676295083016,
+            "mean_ttft_seconds": 0.8654492828063667,
+            "output_tokens_per_second": 9.828157855511108,
+            "predicted": "A",
+            "ttft_seconds": [
+              0.8401978919282556,
+              0.8471494182012975,
+              0.909000538289547
+            ]
+          }
+        },
+        {
+          "answer": "B",
+          "hf_cpu_reference_top3": [
+            [
+              " A",
+              25.25
+            ],
+            [
+              " B",
+              24.5
+            ],
+            [
+              " The",
+              22.25
+            ]
+          ],
+          "input_tokens": 94,
+          "same_answer": true,
+          "same_text": true,
+          "sglang": {
+            "generated_text": " A\nThe plates of a capacitor are charged to a potential difference of 5",
+            "latency_seconds": [
+              2.389416786376387,
+              2.4280622550286353,
+              2.4285774840973318
+            ],
+            "mean_latency_seconds": 2.415352175167451,
+            "mean_ttft_seconds": 0.8815091084688902,
+            "output_tokens_per_second": 9.779357696798769,
+            "predicted": "A",
+            "ttft_seconds": [
+              0.8839647290296853,
+              0.8762648631818593,
+              0.8842977331951261
+            ]
+          },
+          "subject": "high_school_physics",
+          "test_index": 0,
+          "vllm": {
+            "generated_text": " A\nThe plates of a capacitor are charged to a potential difference of 5",
+            "latency_seconds": [
+              2.398920828010887,
+              2.286730149295181,
+              2.404484565369785
+            ],
+            "mean_latency_seconds": 2.363378514225284,
+            "mean_ttft_seconds": 0.8636159361340106,
+            "output_tokens_per_second": 10.001583063294115,
+            "predicted": "A",
+            "ttft_seconds": [
+              0.8620406202971935,
+              0.839899871032685,
+              0.8889073170721531
+            ]
+          }
+        },
+        {
+          "answer": "C",
+          "hf_cpu_reference_top3": [
+            [
+              "\n\n",
+              23.875
+            ],
+            [
+              " ",
+              23.0
+            ],
+            [
+              " A",
+              23.0
+            ]
+          ],
+          "input_tokens": 259,
+          "same_answer": true,
+          "same_text": false,
+          "sglang": {
+            "generated_text": "\n\nA 67-year-old woman comes to the physician for a",
+            "latency_seconds": [
+              2.3234357181936502,
+              2.3506269892677665,
+              2.416051274165511
+            ],
+            "mean_latency_seconds": 2.363371327208976,
+            "mean_ttft_seconds": 0.8797083310782909,
+            "output_tokens_per_second": 10.110112632800853,
+            "predicted": "A",
+            "ttft_seconds": [
+              0.8771396549418569,
+              0.8763529071584344,
+              0.8856324311345816
+            ]
+          },
+          "subject": "professional_medicine",
+          "test_index": 0,
+          "vllm": {
+            "generated_text": " A\n\nWait, I's's's's's'",
+            "latency_seconds": [
+              2.4162636161781847,
+              2.5025599421933293,
+              2.4289627228863537
+            ],
+            "mean_latency_seconds": 2.4492620937526226,
+            "mean_ttft_seconds": 0.9691722438049813,
+            "output_tokens_per_second": 10.134519874270222,
+            "predicted": "A",
+            "ttft_seconds": [
+              0.9640294257551432,
+              0.9141867780126631,
+              1.0293005276471376
+            ]
+          }
+        },
+        {
+          "answer": "D",
+          "hf_cpu_reference_top3": [
+            [
+              " A",
+              26.0
+            ],
+            [
+              "A",
+              22.0
+            ],
+            [
+              " B",
+              21.625
+            ]
+          ],
+          "input_tokens": 53,
+          "same_answer": true,
+          "same_text": false,
+          "sglang": {
+            "generated_text": " A\nExplanation: A. Offerings. The text mentions that the text mentions",
+            "latency_seconds": [
+              2.388164458796382,
+              2.448335363995284,
+              2.492384900804609
+            ],
+            "mean_latency_seconds": 2.4429615745320916,
+            "mean_ttft_seconds": 0.8937589707784355,
+            "output_tokens_per_second": 9.682400457923062,
+            "predicted": "A",
+            "ttft_seconds": [
+              0.8844434730708599,
+              0.91831871913746,
+              0.8785147201269865
+            ]
+          },
+          "subject": "world_religions",
+          "test_index": 0,
+          "vllm": {
+            "generated_text": " A\n```\n\nWhat can murtis be translated as?\nA.",
+            "latency_seconds": [
+              2.3577478579245508,
+              2.5381953679025173,
+              2.2879484640434384
+            ],
+            "mean_latency_seconds": 2.394630563290169,
+            "mean_ttft_seconds": 0.8409276073798537,
+            "output_tokens_per_second": 9.654355063778258,
+            "predicted": "A",
+            "ttft_seconds": [
+              0.8375130533240736,
+              0.8384859128855169,
+              0.8467838559299707
+            ]
+          }
+        }
+      ],
+      "hf_cpu_reference": "transformers bf16 on CPU, next-token top 3 logits",
+      "max_new_tokens": 16,
+      "model": "google/gemma-4-26B-A4B-it",
+      "software": {
+        "sglang": {
+          "sglang": "0.5.21",
+          "torch": "2.13.0+cpu",
+          "torch-spyre": "0.6.0.dev331+master.g64870622",
+          "transformers": "5.16.1"
+        },
+        "vllm": {
+          "spyre-inference": "0.1.0.dev0+g0ccdbf6",
+          "torch": "2.13.0+cpu",
+          "torch-spyre": "0.6.0.dev331+master.g64870622",
+          "transformers": "5.16.1",
+          "vllm": "0.32.0+empty"
+        }
+      }
+    },
+    "ibm-granite/granite-3.3-8b-instruct": {
+      "aggregate": {
+        "matching_answers": 4,
+        "matching_texts": 3,
+        "parity_pass": true,
+        "parity_threshold": 0.15,
+        "sglang": {
+          "accuracy": 0.6,
+          "mean_latency_seconds": 2.559234614297748,
+          "mean_output_tokens_per_second": 6.5561542197409395,
+          "mean_ttft_seconds": 0.26972587819521626
+        },
+        "sglang_over_vllm_latency": 1.001472984586048,
+        "sglang_over_vllm_output_throughput": 0.9972520026477029,
+        "sglang_over_vllm_ttft": 1.000897418334313,
+        "vllm": {
+          "accuracy": 0.8,
+          "mean_latency_seconds": 2.5554704457210997,
+          "mean_output_tokens_per_second": 6.574220159332203,
+          "mean_ttft_seconds": 0.2694840382784605
+        }
+      },
+      "batch_size": 1,
+      "dataset": "cais/mmlu",
+      "dataset_revision": "c30699e8356da336a370243923dbaf21066bb9fe",
+      "examples": [
+        {
+          "answer": "B",
+          "hf_cpu_reference_top3": [
+            [
+              " D",
+              19.495
+            ],
+            [
+              " B",
+              19.398
+            ],
+            [
+              "\n",
+              17.68
+            ]
+          ],
+          "input_tokens": 71,
+          "same_answer": false,
+          "same_text": false,
+          "sglang": {
+            "generated_text": " D\n\nWhich of the following is the correct factorization of the expression ",
+            "latency_seconds": [
+              2.6484305332414806,
+              2.5987483239732683,
+              2.762257951311767
+            ],
+            "mean_latency_seconds": 2.6698122695088387,
+            "mean_ttft_seconds": 0.2778731817379594,
+            "output_tokens_per_second": 6.271062702511775,
+            "predicted": "D",
+            "ttft_seconds": [
+              0.28226681891828775,
+              0.26283285208046436,
+              0.28851987421512604
+            ]
+          },
+          "subject": "abstract_algebra",
+          "test_index": 0,
+          "vllm": {
+            "generated_text": " B\n\nWhich of the following is the correct factorization of the expression ",
+            "latency_seconds": [
+              2.856743881944567,
+              2.656971120275557,
+              2.4753111260943115
+            ],
+            "mean_latency_seconds": 2.663008709438145,
+            "mean_ttft_seconds": 0.2621331103146076,
+            "output_tokens_per_second": 6.247720625540071,
+            "predicted": "B",
+            "ttft_seconds": [
+              0.2364293490536511,
+              0.3106898129917681,
+              0.23928016889840364
+            ]
+          }
+        },
+        {
+          "answer": "A",
+          "hf_cpu_reference_top3": [
+            [
+              " A",
+              17.894
+            ],
+            [
+              " D",
+              13.615
+            ],
+            [
+              "\n",
+              13.489
+            ]
+          ],
+          "input_tokens": 125,
+          "same_answer": true,
+          "same_text": true,
+          "sglang": {
+            "generated_text": " A\n\nExplanation: The facial nerve (cranial nerve V",
+            "latency_seconds": [
+              2.4455883791670203,
+              2.5063636018894613,
+              2.7807634128257632
+            ],
+            "mean_latency_seconds": 2.5775717979607484,
+            "mean_ttft_seconds": 0.26542159557963413,
+            "output_tokens_per_second": 6.48746780574748,
+            "predicted": "A",
+            "ttft_seconds": [
+              0.2680782708339393,
+              0.25298557290807366,
+              0.27520094299688935
+            ]
+          },
+          "subject": "anatomy",
+          "test_index": 0,
+          "vllm": {
+            "generated_text": " A\n\nExplanation: The facial nerve (cranial nerve V",
+            "latency_seconds": [
+              2.4490266726352274,
+              2.505314602982253,
+              2.645358156878501
+            ],
+            "mean_latency_seconds": 2.5332331441653273,
+            "mean_ttft_seconds": 0.262459850559632,
+            "output_tokens_per_second": 6.605679238098635,
+            "predicted": "A",
+            "ttft_seconds": [
+              0.23589833220466971,
+              0.24183482769876719,
+              0.30964639177545905
+            ]
+          }
+        },
+        {
+          "answer": "B",
+          "hf_cpu_reference_top3": [
+            [
+              " C",
+              18.714
+            ],
+            [
+              "\n",
+              15.417
+            ],
+            [
+              " B",
+              15.117
+            ]
+          ],
+          "input_tokens": 100,
+          "same_answer": true,
+          "same_text": false,
+          "sglang": {
+            "generated_text": " C\n\nThe charge (Q) on a capacitor can be calculated using",
+            "latency_seconds": [
+              2.560828025918454,
+              2.4519664738327265,
+              2.5081172068603337
+            ],
+            "mean_latency_seconds": 2.506970568870505,
+            "mean_ttft_seconds": 0.25515848211944103,
+            "output_tokens_per_second": 6.661301841417036,
+            "predicted": "C",
+            "ttft_seconds": [
+              0.25953143695369363,
+              0.25340785831213,
+              0.2525361510924995
+            ]
+          },
+          "subject": "high_school_physics",
+          "test_index": 0,
+          "vllm": {
+            "generated_text": " C\n\nThe correct answer is C. 0.02 C.",
+            "latency_seconds": [
+              2.369894713629037,
+              2.7747097089886665,
+              2.6131399790756404
+            ],
+            "mean_latency_seconds": 2.585914800564448,
+            "mean_ttft_seconds": 0.26306312903761864,
+            "output_tokens_per_second": 6.457579786031012,
+            "predicted": "C",
+            "ttft_seconds": [
+              0.2495425990782678,
+              0.23792706476524472,
+              0.3017197232693434
+            ]
+          }
+        },
+        {
+          "answer": "C",
+          "hf_cpu_reference_top3": [
+            [
+              " C",
+              18.66
+            ],
+            [
+              " D",
+              13.32
+            ],
+            [
+              "\n",
+              12.609
+            ]
+          ],
+          "input_tokens": 320,
+          "same_answer": true,
+          "same_text": true,
+          "sglang": {
+            "generated_text": " C\n\nExplanation: The patient's symptoms of persistent tingling and",
+            "latency_seconds": [
+              2.557471844833344,
+              2.5497258282266557,
+              2.604990624822676
+            ],
+            "mean_latency_seconds": 2.5707294326275587,
+            "mean_ttft_seconds": 0.2924213136235873,
+            "output_tokens_per_second": 6.58383292184276,
+            "predicted": "C",
+            "ttft_seconds": [
+              0.29963865084573627,
+              0.2823247336782515,
+              0.2953005563467741
+            ]
+          },
+          "subject": "professional_medicine",
+          "test_index": 0,
+          "vllm": {
+            "generated_text": " C\n\nExplanation: The patient's symptoms of persistent tingling and",
+            "latency_seconds": [
+              2.4317759796977043,
+              2.3257345519959927,
+              2.395492102019489
+            ],
+            "mean_latency_seconds": 2.3843342112377286,
+            "mean_ttft_seconds": 0.2755045526040097,
+            "output_tokens_per_second": 7.112950037756151,
+            "predicted": "C",
+            "ttft_seconds": [
+              0.2593221520073712,
+              0.3039569207467139,
+              0.26323458505794406
+            ]
+          }
+        },
+        {
+          "answer": "D",
+          "hf_cpu_reference_top3": [
+            [
+              " D",
+              19.805
+            ],
+            [
+              "\n",
+              15.306
+            ],
+            [
+              " ",
+              13.678
+            ]
+          ],
+          "input_tokens": 55,
+          "same_answer": true,
+          "same_text": true,
+          "sglang": {
+            "generated_text": " D. Idols\n\n---\n\nWhich of the following is NOT a",
+            "latency_seconds": [
+              2.4903854080475867,
+              2.4619820062071085,
+              2.460899593308568
+            ],
+            "mean_latency_seconds": 2.471089002521088,
+            "mean_ttft_seconds": 0.25775481791545946,
+            "output_tokens_per_second": 6.777105827185649,
+            "predicted": "D",
+            "ttft_seconds": [
+              0.25774005660787225,
+              0.26322237914428115,
+              0.252302017994225
+            ]
+          },
+          "subject": "world_religions",
+          "test_index": 0,
+          "vllm": {
+            "generated_text": " D. Idols\n\n---\n\nWhich of the following is NOT a",
+            "latency_seconds": [
+              2.7218815768137574,
+              2.5099380519241095,
+              2.600764460861683
+            ],
+            "mean_latency_seconds": 2.61086136319985,
+            "mean_ttft_seconds": 0.28425954887643456,
+            "output_tokens_per_second": 6.447171109235147,
+            "predicted": "D",
+            "ttft_seconds": [
+              0.29512380436062813,
+              0.26527557708323,
+              0.29237926518544555
+            ]
+          }
+        }
+      ],
+      "hf_cpu_reference": "transformers fp32 on CPU, next-token top 3 logits",
+      "max_new_tokens": 16,
+      "model": "ibm-granite/granite-3.3-8b-instruct",
+      "software": {
+        "sglang": {
+          "sglang": "0.5.21",
+          "torch": "2.13.0+cpu",
+          "torch-spyre": "0.6.0.dev331+master.g64870622",
+          "transformers": "5.16.1"
+        },
+        "vllm": {
+          "spyre-inference": "0.1.0.dev0+g0ccdbf6",
+          "torch": "2.13.0+cpu",
+          "torch-spyre": "0.6.0.dev331+master.g64870622",
+          "transformers": "5.16.1",
+          "vllm": "0.32.0+empty"
+        }
+      }
+    }
+  }
+}

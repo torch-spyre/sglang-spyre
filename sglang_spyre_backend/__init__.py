@@ -62,6 +62,51 @@ def _install_device_module_stubs(spyre_mod) -> None:
     d["_sglang_stubs_installed"] = True
 
 
+def _install_when_imported(target: str, module: str, func: str) -> None:
+    """Call ``module.func()`` once ``target`` has finished importing.
+
+    activate() runs while ``sglang.srt.*`` is mid-import, so it must not import
+    SGLang itself; a meta-path finder wraps the target's loader instead.
+    """
+    import importlib
+    import importlib.abc
+    import sys
+
+    def run():
+        getattr(importlib.import_module(module), func)()
+
+    if target in sys.modules and getattr(sys.modules[target], "__spec__", None) is not None:
+        mod = sys.modules[target]
+        if getattr(mod, "_spyre_hooked", False):
+            return
+        if hasattr(mod, "HfModelConfigParser"):
+            mod._spyre_hooked = True
+            run()
+            return
+
+    class _Finder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path=None, target_=None):
+            if fullname != target:
+                return None
+            sys.meta_path.remove(self)
+            spec = importlib.util.find_spec(fullname)
+            if spec is None or spec.loader is None:
+                return spec
+            original = spec.loader.exec_module
+
+            def exec_module(m):
+                original(m)
+                m._spyre_hooked = True
+                run()
+
+            spec.loader.exec_module = exec_module
+            return spec
+
+    import importlib.util  # noqa: F401
+
+    sys.meta_path.insert(0, _Finder())
+
+
 def activate():
     """Return platform class name if Spyre hardware is available.
 
@@ -78,6 +123,18 @@ def activate():
         os.environ.setdefault("WORLD_SIZE", "1")
         os.environ.setdefault("LOCAL_RANK", "0")
         os.environ.setdefault("LOCAL_WORLD_SIZE", "1")
+
+        # spyre-inference's configure_threading (#678, #1254): clamp the CPU thread
+        # pools and default OMP_WAIT_POLICY=PASSIVE before the scheduler process
+        # is spawned, which reads them at its torch import.
+        try:
+            from sglang_spyre_backend.threading_config import configure_threading
+
+            configure_threading(worker_count=1)
+        except Exception as exc:  # never block platform discovery on this
+            import logging
+
+            logging.getLogger(__name__).warning("Spyre threading config skipped: %s", exc)
 
         # Probe: does torch_spyre import? That's enough to claim the platform —
         # device availability will be checked at init_backend() time.
@@ -105,6 +162,15 @@ def activate():
             pass
         if hasattr(torch, "spyre"):
             _install_device_module_stubs(torch.spyre)
+
+        # Config normalization runs in the Engine (parent) process, before any
+        # worker calls init_backend(), so the model-config repairs are installed
+        # here, deferred until SGLang's config module finishes importing.
+        _install_when_imported(
+            "sglang.srt.utils.hf_transformers.config",
+            "sglang_spyre_backend.models",
+            "install_config_hooks",
+        )
 
         return "sglang_spyre_backend.platform.SpyreSRTPlatform"
 

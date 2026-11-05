@@ -34,9 +34,28 @@ class SpyreSRTPlatform(SRTPlatform, SpyreDeviceMixin):
         if getattr(server_args, "attention_backend", None) is None:
             server_args.attention_backend = "spyre_paged"
 
-        # The imported spyre-inference kernel requires a stick-aligned page.
+        # spyre-inference's default KV block size (platform._DEFAULT_BLOCK_SIZE, #746):
+        # a power of two and a multiple of the 64-element stick.
         if getattr(server_args, "page_size", None) is None:
-            server_args.page_size = 64
+            server_args.page_size = 128
+
+        # spyre-inference keeps every layer's KV in one paged cache and applies a
+        # layer's sliding window in its attention mask (#1317, #752); this backend
+        # owns the pages the same way, so SGLang's separate SWA pool is not used.
+        if hasattr(server_args, "disable_hybrid_swa_memory"):
+            server_args.disable_hybrid_swa_memory = True
+
+        # Spyre runs each step synchronously, so SGLang's overlap scheduler has no
+        # device time to hide host work behind; it only launches one speculative
+        # decode step past a request's last token. vLLM's spyre-inference engine
+        # steps synchronously too.
+        if hasattr(server_args, "disable_overlap_schedule"):
+            server_args.disable_overlap_schedule = True
+
+        # The first request traces and compiles every decoder block; raise the
+        # watchdog so that warmup does not count as a hung forward.
+        if getattr(server_args, "watchdog_timeout", 300) < 3600:
+            server_args.watchdog_timeout = 3600
 
         # TP=1 only
         if getattr(server_args, "tp_size", 1) > 1:

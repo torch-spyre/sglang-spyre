@@ -35,6 +35,9 @@ def install() -> None:
     _install_oot_op_forwards()
     _force_rotary_init_on_cpu()
     _install_post_load_hook()
+    from sglang_spyre_backend import models
+
+    models.install()
 
 
 def _install_oot_op_forwards() -> None:
@@ -153,22 +156,27 @@ def _install_post_load_hook() -> None:
             dev = "cpu"
         force_spyre = _os.environ.get("SGLANG_FORCE_DEVICE_SPYRE") == "1"
         if "spyre" in dev or force_spyre:
+            from sglang_spyre_backend import models
             from sglang_spyre_backend.custom_ops.weight_placement import (
                 move_model_to_spyre,
             )
             from sglang_spyre_backend.model_wrapper import bodify_model_for_spyre
 
-            try:
-                bodify_model_for_spyre(self.model)
-            except Exception:
-                logger.exception("bodify_model_for_spyre failed")
-            try:
-                # Run after body placement: the tied-weight-safe LM-head path
-                # deliberately keeps the embedding weight on CPU while adding
-                # a separate transposed projection on Spyre.
-                move_model_to_spyre(self.model)
-            except Exception:
-                logger.exception("move_model_to_spyre failed")
+            # Model adaptations that read loaded weights (MoE expert stacks)
+            # run before the device move, as spyre-inference's load fix-ups do.
+            models.post_load(self.model)
+            # Weights are transposed on the host and moved by their methods; the
+            # rest of the body follows, with RoPE and the embedding kept on CPU.
+            move_model_to_spyre(self.model)
+            from sglang_spyre_backend.model_wrapper import default_token_buckets
+
+            args = self.server_args
+            chunk = getattr(args, "chunked_prefill_size", None) or 0
+            budget = chunk if chunk > 0 else int(self.model_config.context_len)
+            bodify_model_for_spyre(
+                self.model,
+                default_token_buckets(budget, int(getattr(args, "max_running_requests", 1) or 1)),
+            )
         return result
 
     ModelRunner.load_model = _spyre_load_model
@@ -178,32 +186,42 @@ def _install_post_load_hook() -> None:
 def _defer_patch_until_class_exists(mr_mod) -> None:
     """The model_runner module is mid-import and ModelRunner isn't bound yet.
 
-    Install a one-shot ``__getattr__`` on the module that, the first time
-    someone reads ``mr_mod.ModelRunner``, performs the patch and returns the
-    real class. This works because class-body imports complete before any
-    other module references ModelRunner (it's only used at construction time).
+    SGLang 0.5.21 calls ``init_backend()`` from model_runner's own module body,
+    before ``class ModelRunner`` runs, and its callers bind the class with
+    ``from ... import ModelRunner``, which reads the module dict and never
+    reaches a module ``__getattr__``. So a meta-path finder wraps the module's
+    loader and installs the patch the moment the module finishes executing.
     """
-    # If a __getattr__ is already in place, chain to it.
-    _existing_getattr = getattr(mr_mod, "__getattr__", None)
+    import importlib.abc
+    import sys
 
-    def _module_getattr(name):
-        if name == "ModelRunner":
-            # The class statement must have run by now if it's being looked up.
-            # Restore default behaviour and run the patch.
-            cls = mr_mod.__dict__.get("ModelRunner")
-            if cls is not None:
-                # Remove our __getattr__ and patch immediately.
-                try:
-                    del mr_mod.__getattr__
-                except AttributeError:
-                    pass
+    name = mr_mod.__name__
+    spec = getattr(mr_mod, "__spec__", None)
+    loader = getattr(spec, "loader", None)
+    if loader is None or getattr(loader, "_spyre_wrapped", False):
+        return
+    original_exec = loader.exec_module
+
+    def exec_module(module):
+        original_exec(module)
+        if module.__name__ == name:
+            _install_post_load_hook()
+
+    # The module is executing under this loader right now; wrapping the bound
+    # method on the instance covers this execution's tail as well, because the
+    # finder below re-runs the patch at the next import-system touch otherwise.
+    loader.exec_module = exec_module
+    loader._spyre_wrapped = True
+
+    class _PatchWhenLoaded(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            if "ModelRunner" in vars(mr_mod) and not _PATCHED_LOAD_MODEL:
                 _install_post_load_hook()
-                return cls
-        if _existing_getattr is not None:
-            return _existing_getattr(name)
-        raise AttributeError(name)
+            if _PATCHED_LOAD_MODEL and self in sys.meta_path:
+                sys.meta_path.remove(self)
+            return None
 
-    mr_mod.__getattr__ = _module_getattr
+    sys.meta_path.insert(0, _PatchWhenLoaded())
 
 
 __all__ = ["install"]

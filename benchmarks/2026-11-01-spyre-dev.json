@@ -1,0 +1,45 @@
+{
+  "date": "2026-11-01",
+  "environment": {
+    "cluster": "api.dev.spyre.res.ibm.com",
+    "container_image": "icr.io/ai_sw_accel/2.0/next/spyre-backend",
+    "container_image_digest": "sha256:e655db95b4037ecb3e587658a59ed2ce6a8b6b393da8bfe85eac21708353d657",
+    "cpu": "Intel(R) Xeon(R) 6736P, 32 pinned cores per card",
+    "kernel_cache": "SPYRE_KERNEL_CACHE unset (off)",
+    "node": "p1-worker-80",
+    "pod": "galbloch-spyre-dev-pf",
+    "runtime_rpms": {
+      "ibm-aiu-toolbox-e2e": "2.0.0_rc.5-0.main.6+6.3307e2f9",
+      "ibm-deeptools": "2.0.0_rc.1-0.master.198+198.092f4e79",
+      "ibm-flex": "2.0.0_rc.1-0.main.87+87.5aaf4902",
+      "ibm-libaiupti": "2.0.0_rc.2-0.main.17+17.3c1815cb",
+      "ibm-senlib": "2.0.0_rc.5-0.main.25+25.15d57f06",
+      "ibm-spyre-comms": "2.0.0_rc.1-0.main.34+34.748f4ace"
+    },
+    "sglang_revision": "e00930c5489053f26d86b179cee0d087f846acbb",
+    "spyre_inference_revision": "0ccdbf6ac2da7faacf98db93464b274fb8f40126",
+    "torch": "2.13.0+cpu",
+    "torch_spyre_revision": "64870622fc39cda7e344a271decb901e7088c6c6",
+    "transformers": "5.16.1",
+    "vllm_revision": "5df63a7203cdb9328d824a27b682e77c7b9928be"
+  },
+  "ported_attention_kernel_ab": {
+    "candidate_median_ms": 0.14974505174905062,
+    "candidate_over_reference": 1.0680953661292174,
+    "command": "tests/spyre_kernel_ab.py (vLLM environment, this repo on PYTHONPATH)",
+    "exact_output_match": true,
+    "geometry": {
+      "cached_tokens": 512,
+      "head_size": 128,
+      "kv_heads": 8,
+      "query_heads": 32
+    },
+    "kernel": "page_attn_head_major_decode_kernel",
+    "spyre_inference_median_ms": 0.14019820373505354
+  },
+  "spyre_attention_smoke": {
+    "command": "tests/test_attention_smoke.py",
+    "geometry": "granite-3.3-8b-instruct attention, 8-token prefill",
+    "max_abs_error_vs_cpu_sdpa": 0.0088
+  }
+}

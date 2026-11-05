@@ -1,8 +1,20 @@
 # Reproducible compatibility baseline used by CI and hardware benchmarks.
-spyre_inference_revision = "6e5ff996178255ff63acec480cf8fb43ce1e43de"
-torch_spyre_revision = "a31289852145a59099edccc3e506cf5336e8e2e0"
+#
+# spyre-inference main at 0ccdbf6 (2026-10-30, #1395) and the pins its
+# pyproject.toml / uv.lock resolve to.
+spyre_inference_revision = "0ccdbf6ac2da7faacf98db93464b274fb8f40126"
+torch_spyre_revision = "64870622fc39cda7e344a271decb901e7088c6c6"
+# The vLLM spyre-inference runs against; the parity benchmark's reference leg.
+vllm_version = "0.32.0"
+vllm_revision = "5df63a7203cdb9328d824a27b682e77c7b9928be"
 torch_version = "2.13.0"
-transformers_version = "5.14.1"
+# spyre-inference caps transformers <5.17 and locks 5.16.1.
+transformers_version = "5.16.1"
 torchvision_version = "0.28.0"
-sglang_version = "0.5.18"
-sglang_revision = "71de97b264b04dcd514cf904003028aefe9775c8"
+# Newest SGLang release that pins torch 2.13.0: 0.5.22 and 0.5.23 require
+# torch 2.14.1 and transformers 5.19.0, and release/v0.5.21 has no commits
+# past the tag.
+sglang_version = "0.5.21"
+sglang_revision = "e00930c5489053f26d86b179cee0d087f846acbb"
+# Spyre system RPM bundle; spyre-rpms.lock carries the per-package builds.
+spyre_rpm_bundle = "main_nightly_2026_10_27"

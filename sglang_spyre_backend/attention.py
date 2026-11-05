@@ -3,156 +3,157 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 
-"""SGLang adapter for spyre-inference's dense paged-attention implementation.
+"""SGLang adapter for spyre-inference's head-major paged attention.
 
-The device kernels are ported verbatim in :mod:`spyre_attention_kernel`; this
-module only translates SGLang's ``ForwardBatch`` metadata into the tensors that
-those kernels consume.  Baseline: spyre-inference 6e5ff996 (2026-08-26).
+The device kernels are ported verbatim in :mod:`sglang_spyre_backend.ops` and
+driven by :mod:`sglang_spyre_backend.spyre_attention`; this module only turns
+SGLang's ``ForwardBatch`` into the four tensors spyre-inference's builder reads
+(query start offsets, sequence lengths, the page table and the slot mapping).
+Baseline: spyre-inference 0ccdbf6 (2026-10-30).
+
+Layers are grouped as spyre-inference groups them (#874, #960, #1317): one
+metadata builder per distinct (sliding window, KV heads, head size, query
+heads), and one KV page set per layer. Gemma-4 therefore gets one group for its
+sliding-window layers and one for its full-attention layers, each with its own
+masks, buckets and recorded kernels. SGLang's page size is the KV block size.
 """
 
 from __future__ import annotations
 
-import os
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 
-from sglang_spyre_backend.spyre_attention_kernel import (
-    create_compilable_page_attn,
-    maybe_compile,
-    reshape_and_cache_kernel,
-    slot_major_kv_layout,
+from sglang_spyre_backend import envs
+from sglang_spyre_backend.custom_ops.utils import convert
+from sglang_spyre_backend.spyre_attention import (
+    GroupSpec,
+    SeqBatch,
+    SpyreAttentionMetadata,
+    SpyreAttentionMetadataBuilder,
+    SpyreHeadMajorAttention,
+    SpyrePagedKVCache,
 )
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
+logger = logging.getLogger(__name__)
 
-KV_LENGTH_ALIGNMENT = 256
-QUERY_CHUNK_SIZE = 32
-INT32_ELEMS_PER_STICK = 32
+# SGLang reserves page 0 for padded tokens' dummy writes (PagedTokenToKVPoolAllocator
+# .clear), the same role vLLM's null block plays for spyre-inference.
+_NULL_SLOT = 0
+
+
+@dataclass(frozen=True)
+class _BucketerConfig:
+    block_size: int
+    max_model_len: int
+    max_num_batched_tokens: int
+    max_num_seqs: int
+    min_num_kv_heads: int
 
 
 def _ceil_to(value: int, alignment: int) -> int:
     return (value + alignment - 1) // alignment * alignment
 
 
-def _convert(tensor: torch.Tensor, device: torch.device, dtype=None) -> torch.Tensor:
-    """Match spyre-inference's dtype-on-CPU then device conversion contract."""
-    target_dtype = tensor.dtype if dtype is None else dtype
-    if tensor.device.type == "spyre" and tensor.dtype != target_dtype:
-        tensor = tensor.to("cpu")
-    if tensor.dtype != target_dtype:
-        tensor = tensor.to(dtype=target_dtype)
-    if tensor.device.type != device.type:
-        tensor = tensor.to(device)
-    return tensor
-
-
-@dataclass
-class SpyreAttentionState:
-    num_actual_tokens: int = 0
-    query_len: int = 0
-    seq_len: int = 0
-    block_size: int = 0
-    aligned_query_len: int = 0
-    page_index_table_cpu: torch.Tensor | None = None
-    page_index_table_device: torch.Tensor | None = None
-    slot_mapping_cpu: torch.Tensor | None = None
-    slot_mapping_device: torch.Tensor | None = None
-    mask_tiles_cpu: list[torch.Tensor] | None = None
-    mask_tiles_device: list[torch.Tensor] | None = None
-
-
 class SpyreAttentionBackend(AttentionBackend):
-    """Latest spyre-inference paged attention behind SGLang's backend API.
+    """spyre-inference head-major paged attention behind SGLang's backend API.
 
-    The supported path intentionally has the same current limits as this
-    prototype's original paged path: decoder self-attention, one sequence,
-    and TP=1.  KV pages remain resident on Spyre and are read through the
-    same compiled indirect ``index_select`` loop used by spyre-inference.
+    Decoder self-attention, TP=1. Batches of several sequences are accepted by the
+    builder and the batched decode kernel, as in spyre-inference; the engine
+    defaults keep ``max_running_requests=1`` for the validated configuration.
     """
 
     needs_cpu_seq_lens: bool = True
 
     def __init__(self, model_runner):
         super().__init__()
+        if envs.SPYRE_ATTN_KV_LAYOUT != "head_major":
+            raise NotImplementedError(
+                "The SGLang Spyre backend ports only the head-major KV layout, "
+                "spyre-inference's default; unset SPYRE_ATTN_KV_LAYOUT."
+            )
         self.model_runner = model_runner
-        self._target_device = torch.device("spyre")
-        self._target_dtype = torch.float16
-        self._state = SpyreAttentionState()
-        self._k_cache: dict[int, torch.Tensor] = {}
-        self._v_cache: dict[int, torch.Tensor] = {}
-        self._compile_attn = os.environ.get("SGLANG_SPYRE_COMPILE", "1") != "0"
-        # Latest spyre-inference always compiles index_copy_: eager int32
-        # indices otherwise fall back to CPU.
-        self._reshape_fn = torch.compile(reshape_and_cache_kernel, dynamic=False)
-        self._attn_fns: dict[tuple[int, int, str, int], object] = {}
+        self.device = torch.device("spyre")
+        self.model_dtype = torch.float16
+        pool = model_runner.token_to_kv_pool
+        self.block_size = int(pool.page_size)
+        if self.block_size % 64:
+            raise ValueError(
+                "Spyre paged attention requires page_size to be a multiple of 64; "
+                f"got {self.block_size}."
+            )
+        self.num_pages = _ceil_to(int(pool.size) + self.block_size, self.block_size) // (
+            self.block_size
+        )
+        server_args = model_runner.server_args
+        max_model_len = int(model_runner.model_config.context_len)
+        chunk = getattr(server_args, "chunked_prefill_size", None)
+        budget = chunk if chunk and chunk > 0 else max_model_len
+        self.max_num_batched_tokens = int(min(budget, max_model_len))
+        self.max_num_seqs = int(getattr(server_args, "max_running_requests", None) or 1)
+        self._max_model_len = max_model_len
+        # Constant for the run so the kernels never see the graph's token count;
+        # +1 keeps every gather a strict subset (torch-spyre#4033).
+        self.staging_rows = max(self.max_num_batched_tokens, self.max_num_seqs) + 1
+        self._groups: dict[GroupSpec, SpyreAttentionMetadataBuilder] = {}
+        self._impls: dict[int, SpyreHeadMajorAttention] = {}
+        self._layer_groups: dict[int, GroupSpec] = {}
+        self._kv_caches: dict[int, SpyrePagedKVCache] = {}
+        self._metadata: dict[GroupSpec, SpyreAttentionMetadata] = {}
+        self._batch: SeqBatch | None = None
+        self._recorded: set[tuple] = set()
+        from sglang_spyre_backend import opaque
+
+        opaque.set_attention_backend(self)
+
+    # ------------------------------------------------------------------
+    # Per-step metadata
+    # ------------------------------------------------------------------
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
-        if forward_batch.batch_size != 1:
-            raise ValueError(
-                "The SGLang Spyre paged backend currently supports one sequence; "
-                f"got batch_size={forward_batch.batch_size}."
-            )
-
+        bs = forward_batch.batch_size
         seq_lens = forward_batch.seq_lens_cpu
         if seq_lens is None:
             seq_lens = forward_batch.seq_lens.to("cpu")
-        seq_len = int(seq_lens[0].item())
-
+        seq_lens = seq_lens[:bs].to(torch.int32)
         if forward_batch.forward_mode.is_decode():
-            query_len = 1
+            query_lens = torch.ones(bs, dtype=torch.int32)
         else:
-            extend_lens = forward_batch.extend_seq_lens_cpu
-            if extend_lens is not None:
-                query_len = int(extend_lens[0])
-            elif forward_batch.extend_seq_lens is not None:
-                query_len = int(forward_batch.extend_seq_lens[0].item())
-            else:
-                query_len = int(forward_batch.extend_num_tokens or seq_len)
+            extend = forward_batch.extend_seq_lens_cpu
+            if extend is None:
+                extend = forward_batch.extend_seq_lens.to("cpu").tolist()
+            query_lens = torch.tensor(list(extend)[:bs], dtype=torch.int32)
+        query_start_loc = torch.zeros(bs + 1, dtype=torch.int32)
+        query_start_loc[1:] = torch.cumsum(query_lens, 0)
 
-        block_size = int(self.model_runner.token_to_kv_pool.page_size)
-        if block_size % 64:
-            raise ValueError(
-                "Spyre paged attention requires page_size to be a multiple of 64; "
-                f"got {block_size}."
-            )
-
-        state = SpyreAttentionState(
-            num_actual_tokens=query_len,
-            query_len=query_len,
-            seq_len=seq_len,
-            block_size=block_size,
-            aligned_query_len=(
-                1 if query_len == 1 else _ceil_to(query_len, QUERY_CHUNK_SIZE)
-            ),
-            slot_mapping_cpu=forward_batch.out_cache_loc[:query_len]
-            .to(device="cpu", dtype=torch.int32)
-            .contiguous(),
+        # As wide as vLLM's block table (ceil(max_model_len / block_size)), so the
+        # builder's padded block counts index real columns; padding is page 0.
+        max_blocks = _ceil_to(self._max_model_len, self.block_size) // self.block_size
+        req_to_token = self.model_runner.req_to_token_pool.req_to_token
+        req_idx = forward_batch.req_pool_indices.to("cpu")
+        block_table = torch.zeros(bs, max_blocks, dtype=torch.int32)
+        for s in range(bs):
+            n = _ceil_to(int(seq_lens[s]), self.block_size) // self.block_size
+            slots = req_to_token[int(req_idx[s]), : int(seq_lens[s]) : self.block_size]
+            block_table[s, :n] = (slots.to("cpu")[:n] // self.block_size).to(torch.int32)
+        num_tokens = int(query_start_loc[-1])
+        slot_mapping = forward_batch.out_cache_loc[:num_tokens].to(
+            device="cpu", dtype=torch.int64
         )
-
-        req_idx = int(forward_batch.req_pool_indices[0].item())
-        token_slots = self.model_runner.req_to_token_pool.req_to_token[
-            req_idx, :seq_len
-        ].to("cpu")
-        num_blocks = _ceil_to(seq_len, block_size) // block_size
-        physical_pages = (token_slots[::block_size][:num_blocks] // block_size).to(
-            torch.int32
+        self._batch = SeqBatch(
+            query_start_loc=query_start_loc,
+            seq_lens=seq_lens,
+            block_table=block_table,
+            slot_mapping=slot_mapping,
         )
-        page_table = torch.zeros(num_blocks, INT32_ELEMS_PER_STICK, dtype=torch.int32)
-        page_table[:, 0] = physical_pages
-        state.page_index_table_cpu = page_table
-        state.mask_tiles_cpu = self._build_mask_tiles(
-            seq_len=seq_len,
-            query_len=query_len,
-            block_size=block_size,
-            aligned_query_len=state.aligned_query_len,
-        )
-        self._state = state
+        self._metadata = {}
 
     def init_cuda_graph_state(self, max_bs: int, max_num_tokens: int):
         pass
@@ -160,226 +161,133 @@ class SpyreAttentionBackend(AttentionBackend):
     def get_cuda_graph_seq_len_fill_value(self):
         return 1
 
-    def forward_decode(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        layer: RadixAttention,
-        forward_batch: ForwardBatch,
-        save_kv_cache: bool = True,
-        **kwargs,
-    ) -> torch.Tensor:
+    # ------------------------------------------------------------------
+    # Layer groups
+    # ------------------------------------------------------------------
+
+    def _group_of(self, layer: RadixAttention) -> GroupSpec:
+        spec = self._layer_groups.get(layer.layer_id)
+        if spec is not None:
+            return spec
+        if layer.qk_head_dim != layer.v_head_dim:
+            raise NotImplementedError("Spyre requires equal QK and V head dimensions")
+        window = getattr(layer, "sliding_window_size", -1)
+        # SGLang stores an inclusive window minus one (HF's convention); the Spyre
+        # builder takes the window length a query sees, spyre-inference's convention.
+        sliding_window = None if window is None or window < 0 else int(window) + 1
+        spec = GroupSpec(
+            num_heads=layer.tp_q_head_num,
+            num_kv_heads=layer.tp_k_head_num,
+            head_size=layer.qk_head_dim,
+            sliding_window=sliding_window,
+        )
+        if spec not in self._groups:
+            self._groups[spec] = SpyreAttentionMetadataBuilder(
+                spec,
+                _BucketerConfig(
+                    block_size=self.block_size,
+                    max_model_len=self._max_model_len,
+                    max_num_batched_tokens=self.max_num_batched_tokens,
+                    max_num_seqs=self.max_num_seqs,
+                    min_num_kv_heads=spec.num_kv_heads,
+                ),
+                self.model_dtype,
+            )
+        self._layer_groups[layer.layer_id] = spec
+        return spec
+
+    def _impl_of(self, layer: RadixAttention) -> SpyreHeadMajorAttention:
+        impl = self._impls.get(layer.layer_id)
+        if impl is None:
+            spec = self._group_of(layer)
+            impl = SpyreHeadMajorAttention(
+                num_heads=spec.num_heads,
+                num_kv_heads=spec.num_kv_heads,
+                head_size=spec.head_size,
+                scale=float(layer.scaling),
+                block_size=self.block_size,
+                staging_rows=self.staging_rows,
+                logits_soft_cap=float(getattr(layer, "logit_cap", 0.0) or 0.0),
+                model_dtype=self.model_dtype,
+            )
+            self._kv_caches[layer.layer_id] = SpyreHeadMajorAttention.allocate_pages(
+                self.num_pages,
+                spec.num_kv_heads,
+                self.block_size,
+                spec.head_size,
+                self.model_dtype,
+                self.device,
+            )
+            impl.staging_buffers(self.device)
+            self._impls[layer.layer_id] = impl
+            self._maybe_record(layer, impl, spec)
+        return impl
+
+    def _maybe_record(self, layer, impl: SpyreHeadMajorAttention, spec: GroupSpec) -> None:
+        """Record every attention variant of a group once, at its first layer (#707, #1381)."""
+        if not envs.SPYRE_ATTN_RECORD:
+            return
+        key = (spec, impl.graph_key())
+        if key in self._recorded:
+            return
+        self._recorded.add(key)
+        logger.info("Recording Spyre attention graphs for layer %d (%s)...", layer.layer_id, spec)
+        impl.record_graphs(self._kv_caches[layer.layer_id], self._groups[spec])
+
+    def _metadata_for(self, spec: GroupSpec) -> SpyreAttentionMetadata:
+        md = self._metadata.get(spec)
+        if md is None:
+            assert self._batch is not None, "init_forward_metadata must run first"
+            md = self._groups[spec].build(self._batch)
+            self._metadata[spec] = md
+        return md
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+
+    def forward_decode(self, q, k, v, layer, forward_batch, save_kv_cache=True, **kwargs):
         return self._forward_impl(q, k, v, layer, save_kv_cache)
 
-    def forward_extend(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        layer: RadixAttention,
-        forward_batch: ForwardBatch,
-        save_kv_cache: bool = True,
-        **kwargs,
-    ) -> torch.Tensor:
+    def forward_extend(self, q, k, v, layer, forward_batch, save_kv_cache=True, **kwargs):
         return self._forward_impl(q, k, v, layer, save_kv_cache)
 
     def _forward_impl(self, q, k, v, layer, save_kv_cache: bool) -> torch.Tensor:
-        state = self._state
-        num_heads = layer.tp_q_head_num
-        num_kv_heads = layer.tp_k_head_num
-        head_size = layer.qk_head_dim
-        if head_size != layer.v_head_dim:
-            raise NotImplementedError(
-                "Spyre currently requires equal QK and V head dimensions"
-            )
-        if num_heads % num_kv_heads:
-            raise ValueError("num_heads must be divisible by num_kv_heads")
-
-        self._ensure_cache(layer.layer_id, num_kv_heads, head_size, state.block_size)
-        k_pages = self._k_cache[layer.layer_id]
-        v_pages = self._v_cache[layer.layer_id]
+        impl = self._impl_of(layer)
+        spec = self._layer_groups[layer.layer_id]
+        md = self._metadata_for(spec)
+        kv_cache = self._kv_caches[layer.layer_id]
+        num_heads, num_kv_heads, head_size = spec.num_heads, spec.num_kv_heads, spec.head_size
         original_device = q.device
+        # The body pads its tokens to a bucket (model_wrapper._BodyBuckets); rows past
+        # the batch are written to the null slot and their outputs are discarded, as
+        # spyre-inference pads its slot mapping to the body bucket.
+        rows = int(q.shape[0])
 
-        q_dev = _convert(
-            q[: state.num_actual_tokens]
-            .contiguous()
-            .view(state.num_actual_tokens, num_heads, head_size),
-            self._target_device,
-            self._target_dtype,
-        )
-        k_dev = _convert(
-            k[: state.num_actual_tokens]
-            .contiguous()
-            .view(state.num_actual_tokens, num_kv_heads, head_size),
-            self._target_device,
-            self._target_dtype,
-        )
-        v_dev = _convert(
-            v[: state.num_actual_tokens]
-            .contiguous()
-            .view(state.num_actual_tokens, num_kv_heads, head_size),
-            self._target_device,
-            self._target_dtype,
-        )
+        def to_dev(t, heads):
+            return convert(t.reshape(rows, heads, head_size), device=self.device, dtype=self.model_dtype)
 
-        if state.slot_mapping_device is None:
-            assert state.slot_mapping_cpu is not None
-            state.slot_mapping_device = _convert(
-                state.slot_mapping_cpu, self._target_device
-            )
-        if state.page_index_table_device is None:
-            assert state.page_index_table_cpu is not None
-            state.page_index_table_device = _convert(
-                state.page_index_table_cpu, self._target_device
-            )
-        if state.mask_tiles_device is None:
-            assert state.mask_tiles_cpu is not None
-            state.mask_tiles_device = [
-                _convert(tile, self._target_device) for tile in state.mask_tiles_cpu
-            ]
-
-        if save_kv_cache:
-            slots = (-1, num_kv_heads, head_size)
-            self._reshape_fn(
-                k_dev,
-                v_dev,
-                k_pages.view(slots),
-                v_pages.view(slots),
-                state.slot_mapping_device,
+        if save_kv_cache and k is not None and v is not None:
+            if md.kv_write_index is None or md.kv_write_index[0].shape[0] != rows:
+                assert self._batch is not None
+                slots = self._batch.slot_mapping.clamp(min=_NULL_SLOT)
+                if slots.shape[0] < rows:
+                    slots = torch.nn.functional.pad(slots, (0, rows - slots.shape[0]), value=_NULL_SLOT)
+                md.kv_write_index = impl.kv_write_index(slots[:rows], self.device)
+            impl.do_kv_cache_update(
+                to_dev(k, num_kv_heads), to_dev(v, num_kv_heads), kv_cache, md.kv_write_index
             )
 
-        if state.query_len == 1:
-            query = q_dev.unbind(dim=0)[0].reshape(
-                num_kv_heads, num_heads // num_kv_heads, 1, head_size
-            )
-            # Preserve the canonical layout required by torch-spyre on decode.
-            query = torch.ops.spyre.opaque_copy_(
-                query,
-                torch.zeros(
-                    query.shape,
-                    dtype=query.dtype,
-                    device=query.device,
-                ),
-            )
-        else:
-            if state.aligned_query_len > state.query_len:
-                q_dev = torch.nn.functional.pad(
-                    q_dev,
-                    (0, 0, 0, 0, 0, state.aligned_query_len - state.query_len),
-                )
-            query = (
-                q_dev.unsqueeze(0)
-                .transpose(1, 2)
-                .contiguous()
-                .reshape(
-                    num_kv_heads,
-                    num_heads // num_kv_heads,
-                    state.aligned_query_len,
-                    head_size,
-                )
-            )
-
-        num_blocks = len(state.mask_tiles_device)
-        store_mode = "copy" if self._compile_attn else "none"
-        fn = self._get_attn_fn(
-            num_blocks,
-            state.aligned_query_len,
-            num_heads,
-            head_size,
-            store_mode,
-            state.query_len,
-        )
-        output = torch.empty(
-            state.query_len,
-            num_heads,
-            head_size,
-            dtype=self._target_dtype,
-            device=self._target_device,
-        )
-        result = fn(
-            query,
-            k_pages,
-            v_pages,
-            state.page_index_table_device,
-            state.mask_tiles_device,
-            float(layer.scaling),
-            out=output if store_mode == "copy" else None,
-        )
-        if store_mode == "none":
-            output.copy_(result[: state.query_len])
-
-        flat = output.reshape(state.query_len, num_heads * head_size)
+        q_staging, out_staging = impl.staging_buffers(self.device)
+        q_staging[:rows] = to_dev(q, num_heads)
+        impl.forward(q_staging, out_staging, kv_cache, md)
+        # An offset-0 prefix cloned on the device, as spyre-inference reads its
+        # staging buffer back (spyre_attn._run_batched_decode_dispatch); a host
+        # copy of the sliced row-outermost view itself does not read back reliably.
+        out = out_staging[:rows].clone().reshape(rows, num_heads * head_size)
         if original_device.type != "spyre":
-            flat = flat.to(device=original_device, dtype=q.dtype)
-        return flat
-
-    def _get_attn_fn(
-        self,
-        num_blocks: int,
-        query_len: int,
-        num_heads: int,
-        head_size: int,
-        store_mode: str,
-        store_len: int,
-    ):
-        key = (num_blocks, query_len, store_mode, store_len)
-        if key not in self._attn_fns:
-            self._attn_fns[key] = maybe_compile(
-                create_compilable_page_attn(
-                    num_blocks,
-                    query_len,
-                    num_heads,
-                    head_size,
-                    store_mode=store_mode,
-                    store_len=store_len,
-                ),
-                self._compile_attn,
-            )
-        return self._attn_fns[key]
-
-    def _ensure_cache(
-        self, layer_id: int, num_kv_heads: int, head_size: int, block_size: int
-    ) -> None:
-        if layer_id in self._k_cache:
-            return
-        num_slots = int(self.model_runner.token_to_kv_pool.size)
-        num_pages = _ceil_to(num_slots, block_size) // block_size
-        layout = slot_major_kv_layout(
-            num_pages * block_size,
-            num_kv_heads,
-            head_size,
-            self._target_dtype,
-        )
-        shape = (num_pages, block_size, num_kv_heads, head_size)
-        self._k_cache[layer_id] = torch.zeros(shape, dtype=self._target_dtype).to(
-            self._target_device, device_layout=layout
-        )
-        self._v_cache[layer_id] = torch.zeros(shape, dtype=self._target_dtype).to(
-            self._target_device, device_layout=layout
-        )
-
-    def _build_mask_tiles(
-        self,
-        *,
-        seq_len: int,
-        query_len: int,
-        block_size: int,
-        aligned_query_len: int,
-    ) -> list[torch.Tensor]:
-        context_len = seq_len - query_len
-        q_pos = torch.arange(aligned_query_len)
-        kv_pos = torch.arange(_ceil_to(seq_len, block_size))
-        q_valid = q_pos < query_len
-        kv_valid = kv_pos < seq_len
-        causal = kv_pos.unsqueeze(0) <= (context_len + q_pos).unsqueeze(1)
-        attend = q_valid.unsqueeze(1) & kv_valid.unsqueeze(0) & causal
-        mask = torch.where(
-            attend,
-            torch.tensor(0.0, dtype=self._target_dtype),
-            torch.tensor(torch.finfo(self._target_dtype).min, dtype=self._target_dtype),
-        )
-        return [tile.contiguous() for tile in mask.split(block_size, dim=1)]
+            out = convert(out, device=original_device, dtype=q.dtype)
+        return out
 
 
 __all__ = ["SpyreAttentionBackend"]

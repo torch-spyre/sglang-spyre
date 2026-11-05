@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Apply the SGLang 0.5.18 compatibility patch needed by the Spyre backend.
+"""Apply the SGLang 0.5.21 compatibility patches needed by the Spyre backend.
 
-SGLang 0.5.18 already handles OOT device admission, CPU-safe host-cache
-imports, and native RoPE fallback.  Its global ``support_triton`` helper still
-treats unknown attention backends as Triton-capable, so exclude the two Spyre
-backend names. Idempotent: an already-patched file is skipped.
+SGLang 0.5.21 already handles OOT device admission, CPU-safe host-cache
+imports, native RoPE fallback, a lazy ``decode_jpeg`` import and an idempotent
+``qwen3_asr`` config registration, so the 0.5.18 patches for the last two are
+gone. Its global ``support_triton`` helper still treats unknown attention
+backends as Triton-capable, so exclude the two Spyre backend names, and
+image-processor registration still requires torchvision. Gemma-4's
+server-argument hook accepts only in-tree attention backends, so the Spyre
+backend names are added to its allowlist. Idempotent: an already-patched file
+is skipped.
 
 Run inside the venv where sglang is installed:
     python sglang_oot_patches/apply.py
@@ -43,14 +48,6 @@ PATCHES = [
         'return backend not in ["torch_native", "intel_amx", "spyre", "spyre_paged"]',
     ),
     (
-        "utils/common.py",
-        "from torchvision.io import decode_jpeg",
-        """try:
-    from torchvision.io import decode_jpeg
-except (ImportError, RuntimeError):
-    decode_jpeg = None""",
-    ),
-    (
         "configs/utils.py",
         """    AutoImageProcessor.register(
         config, slow_image_processor_class=image_processor, exist_ok=True
@@ -64,12 +61,23 @@ except (ImportError, RuntimeError):
         pass""",
     ),
     (
-        "configs/qwen3_asr.py",
-        'AutoConfig.register("qwen3_asr", Qwen3ASRConfig)\n'
-        'AutoConfig.register("qwen3_asr_thinker", Qwen3ASRThinkerConfig)',
-        'AutoConfig.register("qwen3_asr", Qwen3ASRConfig, exist_ok=True)\n'
-        "AutoConfig.register("
-        '"qwen3_asr_thinker", Qwen3ASRThinkerConfig, exist_ok=True)',
+        "arg_groups/model_hook.py",
+        """            "intel_amx",
+            "aiter",
+        )
+        assert (
+            prefill_backend in accepted_backends and decode_backend in accepted_backends
+        ), (
+            "Gemma4 only supports""",
+        """            "intel_amx",
+            "aiter",
+            "spyre",
+            "spyre_paged",
+        )
+        assert (
+            prefill_backend in accepted_backends and decode_backend in accepted_backends
+        ), (
+            "Gemma4 only supports""",
     ),
 ]
 
@@ -86,7 +94,7 @@ def main() -> int:
             continue
         if old not in src:
             raise RuntimeError(
-                f"{rel}: patch anchor not found; expected sglang==0.5.18"
+                f"{rel}: patch anchor not found; expected sglang==0.5.21"
             )
         with open(path, "w") as f:
             f.write(src.replace(old, new, 1))

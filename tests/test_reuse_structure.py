@@ -28,14 +28,18 @@ def test_paged_attention_uses_framework_neutral_port():
     from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 
     from sglang_spyre_backend.attention import SpyreAttentionBackend
-    from sglang_spyre_backend.spyre_attention_kernel import (
-        create_compilable_page_attn,
-        reshape_and_cache_kernel,
+    from sglang_spyre_backend.ops import (
+        batched_decode_head_major,
+        page_attn_head_major_decode,
+        page_attn_head_major_prefill,
+        reshape_and_cache_head_major,
     )
 
     assert issubclass(SpyreAttentionBackend, AttentionBackend)
-    assert callable(create_compilable_page_attn)
-    assert callable(reshape_and_cache_kernel)
+    assert callable(page_attn_head_major_prefill.page_attn_head_major_prefill_kernel)
+    assert callable(page_attn_head_major_decode.page_attn_head_major_decode_kernel)
+    assert callable(batched_decode_head_major.batched_decode_head_major_kernel)
+    assert callable(reshape_and_cache_head_major.reshape_and_cache_head_major_kernel)
 
 
 def test_kv_pool_is_real_subclass():
