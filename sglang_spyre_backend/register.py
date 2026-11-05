@@ -28,7 +28,15 @@ def _create_spyre_paged_attention_backend(model_runner):
     return SpyreAttentionBackend(model_runner)
 
 
+@register_attention_backend("spyre_embedding")
+def _create_spyre_embedding_attention_backend(model_runner):
+    from sglang_spyre_backend.attention_embedding import SpyreEmbeddingAttentionBackend
+
+    return SpyreEmbeddingAttentionBackend(model_runner)
+
+
 __all__ = [
     "_create_spyre_attention_backend",
     "_create_spyre_paged_attention_backend",
+    "_create_spyre_embedding_attention_backend",
 ]

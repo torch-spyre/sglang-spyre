@@ -53,6 +53,11 @@ through the same code paths but was not part of that comparison.
 Tensor parallelism above 1 is not supported; spyre-inference's TP4 configs run
 here at TP1 when they fit one card (Gemma-4-26B-A4B uses about 52 GB of 112 GB).
 
+The experimental [HF-adapters backend](docs/hf-adapters.md) extends SGLang's
+Transformers wrappers for text generation and embeddings. The unified guide
+covers model preparation, paged and cache-free attention, pooling, setup and
+usage. Its supported scope is separate from the native-model table above.
+
 ## What is synchronized
 
 The device code is spyre-inference's, ported as directly as each framework

@@ -29,6 +29,9 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 
+[project.optional-dependencies]
+hf-adapters = ["hf-adapters-spyre"]
+
 [project.urls]
 Homepage = "https://github.com/torch-spyre/sglang-spyre"
 Repository = "https://github.com/torch-spyre/sglang-spyre"
@@ -71,6 +74,7 @@ USE_SPYRE_PROFILER = "0"
 SPYRE_RPM_BUNDLE = "main_nightly_2026_10_27"
 
 [tool.uv.sources]
+hf-adapters-spyre = { git = "https://github.com/torch-spyre/hf-adapters", rev = "bbf14b723df3c4b76002d00acd09b4d25b025eb5" }
 torch-spyre = { git = "https://github.com/torch-spyre/torch-spyre", rev = "64870622fc39cda7e344a271decb901e7088c6c6" }
 torch = [{ index = "pytorch-cpu" }]
 triton = [
