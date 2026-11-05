@@ -8,8 +8,9 @@ gone. Its global ``support_triton`` helper still treats unknown attention
 backends as Triton-capable, so exclude the two Spyre backend names, and
 image-processor registration still requires torchvision. Gemma-4's
 server-argument hook accepts only in-tree attention backends, so the Spyre
-backend names are added to its allowlist. Idempotent: an already-patched file
-is skipped.
+backend names are added to its allowlist. Transformers construction gains an
+overridable factory for adapter-owned attention. Idempotent: an already-patched
+file is skipped.
 
 Run inside the venv where sglang is installed:
     python sglang_oot_patches/apply.py
@@ -39,6 +40,64 @@ def _sglang_srt_dir() -> str:
                 return candidate
     return os.fspath(dist.locate_file("sglang/srt"))
 
+
+# Extract the upstream constructor without changing its default semantics.
+_TRANSFORMERS_INIT = """        # Resolve model class for _supports_attention_backend check
+        model_cls = _resolve_attention_backend_model_cls(config)
+
+        supports_backend = (
+            getattr(model_cls, "_supports_attention_backend", True)
+            if model_cls
+            else True
+        )
+
+        # Initialize on meta device to avoid premature GPU allocation
+        self.text_config._attn_implementation = "sglang"
+        if supports_backend:
+            with _init_on_device_without_buffers(torch.device("meta")):
+                self.model: PreTrainedModel = AutoModel.from_config(
+                    self.config,
+                    torch_dtype=torch.get_default_dtype(),
+                    trust_remote_code=True,
+                )
+        else:
+            raise ValueError(
+                f"Model {model_cls} does not support custom attention backends "
+                "(_supports_attention_backend=False). The Transformers backend "
+                "requires custom attention support."
+            )"""
+_TRANSFORMERS_FACTORY_ANCHOR = '''    @property
+    def _can_torch_compile(self) -> bool:
+        """Whether this model instance is safe to wrap with torch.compile."""'''
+_TRANSFORMERS_FACTORY = '''    def _create_transformers_model(self):
+        # Resolve model class for _supports_attention_backend check
+        model_cls = _resolve_attention_backend_model_cls(self.config)
+
+        supports_backend = (
+            getattr(model_cls, "_supports_attention_backend", True)
+            if model_cls
+            else True
+        )
+
+        # Initialize on meta device to avoid premature GPU allocation
+        self.text_config._attn_implementation = "sglang"
+        if supports_backend:
+            with _init_on_device_without_buffers(torch.device("meta")):
+                return AutoModel.from_config(
+                    self.config,
+                    torch_dtype=torch.get_default_dtype(),
+                    trust_remote_code=True,
+                )
+        else:
+            raise ValueError(
+                f"Model {model_cls} does not support custom attention backends "
+                "(_supports_attention_backend=False). The Transformers backend "
+                "requires custom attention support."
+            )
+
+    @property
+    def _can_torch_compile(self) -> bool:
+        """Whether this model instance is safe to wrap with torch.compile."""'''
 
 PATCHES = [
     # (relative path, old, new)
@@ -79,6 +138,13 @@ PATCHES = [
         ), (
             "Gemma4 only supports""",
     ),
+    # HF-adapters bypasses HF attention dispatch, including on GPT-Neo.
+    (
+        "models/transformers.py",
+        _TRANSFORMERS_INIT,
+        "        self.model = self._create_transformers_model()",
+    ),
+    ("models/transformers.py", _TRANSFORMERS_FACTORY_ANCHOR, _TRANSFORMERS_FACTORY),
 ]
 
 
