@@ -42,16 +42,11 @@ through the same code paths but was not part of that comparison.
 
 | Model | spyre-inference registry | SGLang status |
 |---|---|---|
-| `ibm-granite/granite-3.3-8b-instruct` | TP1 and TP4 | **Validated** at TP1. Same answer as vLLM on 4/5 MMLU items, the fifth a near-tie the fp32 reference resolves SGLang's way. Latency 1.00x vLLM ([BENCHMARK.md](BENCHMARK.md)). |
-| `google/gemma-4-26B-A4B-it` (text) | TP4 | **Validated** at TP1. Covers MoE, sliding-window attention, final-logit soft-capping and heterogeneous head sizes. Same answer as vLLM wherever both answer; latency 0.99x vLLM ([BENCHMARK.md](BENCHMARK.md)). |
+| `ibm-granite/granite-3.3-8b-instruct` | TP1 and TP4 | Same answer as vLLM on 4/5 MMLU items, the fifth a near-tie the fp32 reference resolves SGLang's way. Latency 1.00x vLLM ([BENCHMARK.md](BENCHMARK.md)). |
+| `google/gemma-4-26B-A4B-it` (text) | TP4 | Covers MoE, sliding-window attention, final-logit soft-capping and heterogeneous head sizes. Same answer as vLLM wherever both answer; latency 0.99x vLLM ([BENCHMARK.md](BENCHMARK.md)). |
 | `google/gemma-3-1b-it` | TP1 | Runs (dense Gemma path with sliding window); not validated in this sync. |
 | `ibm-granite/granite-4.1-8b` | TP4 | Runs (the `GraniteForCausalLM` path validated above); not validated at TP1. |
 | `ibm-granite/granite-4.1-8b-fp8`, `granite-3.3-8b-instruct-FP8` | TP1/TP4 | Not supported: spyre-inference's FP8 linear and FP8 KV cache are not ported. |
-| `ibm-granite/granite-vision-4.1-4b` | TP1 | Not supported: vision towers are not ported. |
-| Embedding, reranker and classifier models | various | Not applicable: SGLang text generation only. |
-
-Tensor parallelism above 1 is not supported; spyre-inference's TP4 configs run
-here at TP1 when they fit one card (Gemma-4-26B-A4B uses about 52 GB of 112 GB).
 
 ## What is synchronized
 
