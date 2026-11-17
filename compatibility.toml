@@ -16,5 +16,7 @@ torchvision_version = "0.28.0"
 # past the tag.
 sglang_version = "0.5.21"
 sglang_revision = "e00930c5489053f26d86b179cee0d087f846acbb"
+# Optional HF-adapters integration; uses this project's Transformers 5.16.1 override.
+hf_adapters_revision = "bbf14b723df3c4b76002d00acd09b4d25b025eb5"
 # Spyre system RPM bundle; spyre-rpms.lock carries the per-package builds.
 spyre_rpm_bundle = "main_nightly_2026_10_27"

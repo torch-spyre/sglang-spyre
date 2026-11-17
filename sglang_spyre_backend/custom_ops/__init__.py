@@ -140,7 +140,23 @@ def _install_post_load_hook() -> None:
     _orig_load_model = ModelRunner.load_model
 
     def _spyre_load_model(self, *args, **kwargs):
+        from sglang_spyre_backend.hf_adapters import uses_hf_adapters, validate_config
+
+        adapter_mode = uses_hf_adapters(self.server_args)
+        if adapter_mode:
+            validate_config(self.server_args, self.model_config)
+            # Platform discovery can run while the registry is already importing,
+            # before a deferred import hook can observe it. The worker load boundary
+            # is always after registry initialization and before model construction.
+            from sglang_spyre_backend.hf_adapters_transformers import install
+
+            install()
         result = _orig_load_model(self, *args, **kwargs)
+        if adapter_mode:
+            if not getattr(self.model, "_hf_adapters", False):
+                raise RuntimeError("HF-adapters Transformers wrapper was not selected")
+            self.model.prepare_hf_adapters(self)
+            return result
         # Trigger max-on-Spyre when EITHER:
         #   (a) the user passed device="spyre" to the engine, OR
         #   (b) SGLANG_FORCE_DEVICE_SPYRE=1 is set (the "max-on-Spyre while

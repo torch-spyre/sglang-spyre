@@ -48,6 +48,11 @@ through the same code paths but was not part of that comparison.
 | `ibm-granite/granite-4.1-8b` | TP4 | Runs (the `GraniteForCausalLM` path validated above); not validated at TP1. |
 | `ibm-granite/granite-4.1-8b-fp8`, `granite-3.3-8b-instruct-FP8` | TP1/TP4 | Not supported: spyre-inference's FP8 linear and FP8 KV cache are not ported. |
 
+The experimental [HF-adapters backend](docs/hf-adapters.md) extends SGLang's
+Transformers wrappers for text generation and embeddings. The unified guide
+covers model preparation, paged and cache-free attention, pooling, setup and
+usage. Its supported scope is separate from the native-model table above.
+
 ## What is synchronized
 
 The device code is spyre-inference's, ported as directly as each framework

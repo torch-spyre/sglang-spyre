@@ -109,9 +109,11 @@ class SpyreAttentionBackend(AttentionBackend):
         self._metadata: dict[GroupSpec, SpyreAttentionMetadata] = {}
         self._batch: SeqBatch | None = None
         self._recorded: set[tuple] = set()
+        self._adapter_warmed = False
         from sglang_spyre_backend import opaque
 
         opaque.set_attention_backend(self)
+        self._warmup_adapter()
 
     # ------------------------------------------------------------------
     # Per-step metadata
@@ -154,6 +156,42 @@ class SpyreAttentionBackend(AttentionBackend):
             slot_mapping=slot_mapping,
         )
         self._metadata = {}
+
+    @torch.no_grad()
+    def _warmup_adapter(self) -> None:
+        """Exercise adapter body/head buckets using only the allocator's null page."""
+        model = getattr(self.model_runner, "model", None)
+        body = getattr(model, "_adapter_body", None)
+        if body is None or self._adapter_warmed:
+            return
+        saved_batch, saved_metadata = self._batch, self._metadata
+        try:
+            for tokens in body.buckets:
+                if tokens > self.max_num_batched_tokens and tokens > self.max_num_seqs:
+                    raise ValueError("Adapter token bucket exceeds attention staging capacity")
+                # Decode buckets may contain more requests than the context length.
+                decode = tokens <= self.max_num_seqs
+                lengths = torch.ones(tokens, dtype=torch.int32) if decode else torch.tensor([tokens], dtype=torch.int32)
+                if not decode and tokens > self._max_model_len:
+                    raise ValueError("Adapter prefill bucket exceeds context length")
+                starts = torch.cat((torch.zeros(1, dtype=torch.int32), lengths.cumsum(0).to(torch.int32)))
+                self._batch = SeqBatch(
+                    query_start_loc=starts,
+                    seq_lens=lengths,
+                    block_table=torch.zeros(
+                        len(lengths), _ceil_to(self._max_model_len, self.block_size) // self.block_size,
+                        dtype=torch.int32,
+                    ),
+                    slot_mapping=torch.zeros(tokens, dtype=torch.int64),
+                )
+                self._metadata = {}
+                ids = torch.zeros(tokens, dtype=torch.int64)
+                positions = torch.zeros_like(ids) if decode else torch.arange(tokens, dtype=torch.int64)
+                hidden = body(ids, positions)
+                model.lm_head.quant_method.apply(model.lm_head, hidden)
+            self._adapter_warmed = True
+        finally:
+            self._batch, self._metadata = saved_batch, saved_metadata
 
     def init_cuda_graph_state(self, max_bs: int, max_num_tokens: int):
         pass
@@ -252,7 +290,10 @@ class SpyreAttentionBackend(AttentionBackend):
     def forward_extend(self, q, k, v, layer, forward_batch, save_kv_cache=True, **kwargs):
         return self._forward_impl(q, k, v, layer, save_kv_cache)
 
+    @torch.inference_mode()
     def _forward_impl(self, q, k, v, layer, save_kv_cache: bool) -> torch.Tensor:
+        # Recording runs during the first opaque attention call. Normalize the
+        # context here so warmup and serving use the same tensor dispatch keys.
         impl = self._impl_of(layer)
         spec = self._layer_groups[layer.layer_id]
         md = self._metadata_for(spec)
